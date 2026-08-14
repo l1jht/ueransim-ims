@@ -1,0 +1,32 @@
+# UERANSIM-IMS host gNB configuration template.
+# Run from the UERANSIM build directory: sudo ./nr-gnb -c <this file>
+# Requires an IP on the docker bridge network (default 172.21.0.1) if the core network
+# runs in containers. Adjust all 172.21.0.x addresses to your environment.
+
+mcc: '001'          # Mobile Country Code value
+mnc: '01'           # Mobile Network Code value (2 or 3 digits)
+
+nci: '0x000000010'  # NR Cell Identity (36-bit)
+idLength: 32        # NR gNB ID length in bits [22...32]
+tac: 1              # Tracking Area Code
+
+# Addresses on the host that the core-network containers can reach.
+# linkIp = Radio Link Simulation (UEs connect here on UDP/4997).
+# ngapIp  = N2 (SCTP) interface toward the AMF.
+# gtpIp   = N3 (GTP-U) interface toward the UPF.
+linkIp: 172.21.0.1
+ngapIp: 172.21.0.1
+gtpIp: 172.21.0.1
+
+# AMF reachable from the host. 172.21.0.5 is the free5gc AMF container IP in the
+# testvonr compose environment; adapt to your core network.
+amfConfigs:
+  - address: 172.21.0.5
+    port: 38412
+
+# S-NSSAIs supported by this gNB (must match the UE requests and the core network).
+slices:
+  - sst: 1
+    sd: 0x010203
+
+ignoreStreamIds: true

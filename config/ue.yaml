@@ -1,0 +1,88 @@
+# UERANSIM-IMS host UE configuration template.
+# Run from the UERANSIM build directory: sudo ./nr-ue -c <this file>
+# Requires root (TUN interface creation) and /dev/net/tun.
+
+# IMSI number of the UE. IMSI = [MCC|MNC|MSISDN] (15 or 16 digits)
+supi: 'imsi-001011234567895'
+mcc: '001'
+mnc: '01'
+
+# Permanent subscription key (Ki), operator code and AMF - must match the HSS/UDM.
+key: '8baf473f2f8fd09487cccbd7097c6862'
+op: '11111111111111111111111111111111'
+opType: 'OP'
+amf: '8000'
+imei: '356938035643803'
+imeiSv: '4370816125816151'
+
+# Radio link simulation target: the host gNB (see config/gnb.yaml).
+gnbSearchList:
+  - 172.21.0.1
+
+# IMPORTANT: the ims TUN must NOT use the default /16 netmask on a host-run UE.
+# A /16 connected route (192.168.0.0/16) catches UPF-N6-returned packets sourced from
+# the UE's own ims IP and re-injects them into the TUN, causing an uplink flood loop.
+# 255.255.255.0 keeps the connected route inside the ims subnet only.
+tunNetmask: '255.255.255.0'
+
+uacAic:
+  mps: false
+  mcs: false
+
+uacAcc:
+  normalClass: 0
+  class11: false
+  class12: false
+  class13: false
+  class14: false
+  class15: false
+
+# Initial PDU sessions to be established.
+sessions:
+  - type: 'IPv4'
+    apn: 'internet'
+    slice:
+      sst: 1
+      sd: 0x010203
+  - type: 'IPv4'
+    apn: 'ims'
+    slice:
+      sst: 1
+      sd: 0x010203
+
+configured-nssai:
+  - sst: 1
+    sd: 0x010203
+
+default-nssai:
+  - sst: 1
+    sd: 0x010203
+
+integrity:
+  IA1: true
+  IA2: true
+  IA3: true
+
+ciphering:
+  EA1: true
+  EA2: true
+  EA3: true
+
+integrityMaxRate:
+  uplink: 'full'
+  downlink: 'full'
+
+# Embedded IMS SIP client. enable defaults to false (no behavioural change without it).
+ims:
+  enable: true
+  sipPort: 5060         # local SIP port (offset per UE when several share a host)
+  pcscf: 172.21.0.21    # P-CSCF address (config-based; EPCO parsing is a P4 enhancement)
+  pcscfPort: 5060
+  registrar: ims.mnc001.mcc001.3gppnetwork.org
+  publicIdentity: sip:001011234567895@ims.mnc001.mcc001.3gppnetwork.org
+  privateIdentity: 001011234567895@ims.mnc001.mcc001.3gppnetwork.org
+  realm: ims.mnc001.mcc001.3gppnetwork.org
+  password: 8baf473f2f8fd09487cccbd7097c6862   # Ki (scscf MD5 mode)
+  expires: 300          # request expires (the 200 OK value wins; re-register at 90%)
+  mediaPort: 50000      # local RTP media port (P3)
+  autoAnswer: true      # auto-answer incoming INVITEs (false: use `ims-answer`)

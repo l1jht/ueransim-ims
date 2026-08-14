@@ -1,0 +1,3947 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 08ec1fd..a7135c5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -17,6 +17,11 @@ add_subdirectory(src/lib)
+ add_subdirectory(src/gnb)
+ add_subdirectory(src/ue)
+ 
++#################### TESTS ####################
++
++enable_testing()
++add_subdirectory(tests)
++
+ #################### GNB EXECUTABLE ####################
+ 
+ add_executable(nr-gnb src/gnb.cpp)
+diff --git a/src/gnb/gtp/task.cpp b/src/gnb/gtp/task.cpp
+index 0475dcb..b9a131b 100644
+--- a/src/gnb/gtp/task.cpp
++++ b/src/gnb/gtp/task.cpp
+@@ -217,6 +217,10 @@ void GtpTask::handleUplinkData(int ueId, int psi, OctetString &&pdu)
+         else
+             m_udpServer->send(InetAddress(pduSession->upTunnel.address, cons::GtpPort), gtpPdu);
+     }
++    else
++    {
++        m_logger->err("Uplink data dropped by rate limiter UE[%d] PSI[%d] len=%zu", ueId, psi, pdu.length());
++    }
+ }
+ 
+ void GtpTask::handleUdpReceive(const udp::NwUdpServerReceive &msg)
+diff --git a/src/lib/app/cli_cmd.cpp b/src/lib/app/cli_cmd.cpp
+index ca6325e..351b43c 100644
+--- a/src/lib/app/cli_cmd.cpp
++++ b/src/lib/app/cli_cmd.cpp
+@@ -167,6 +167,11 @@ static OrderedMap<std::string, CmdEntry> g_ueCmdEntries = {
+     {"ps-release-all", {"Trigger PDU session release procedures for all active sessions", "", DefaultDesc, false}},
+     {"deregister",
+      {"Perform a de-registration by the UE", "<normal|disable-5g|switch-off|remove-sim>", DefaultDesc, true}},
++    {"ims-register", {"Trigger an IMS SIP registration", "", DefaultDesc, false}},
++    {"ims-call", {"Initiate an IMS call (INVITE)", "<uri>", DefaultDesc, true}},
++    {"ims-answer", {"Answer an incoming IMS call", "", DefaultDesc, false}},
++    {"ims-hangup", {"Hang up the current IMS call", "", DefaultDesc, false}},
++    {"ims-status", {"Show the IMS registration/call status", "", DefaultDesc, false}},
+ };
+ 
+ static std::unique_ptr<GnbCliCommand> GnbCliParseImpl(const std::string &subCmd, const opt::OptionsResult &options,
+@@ -331,6 +336,30 @@ static std::unique_ptr<UeCliCommand> UeCliParseImpl(const std::string &subCmd, c
+     {
+         return std::make_unique<UeCliCommand>(UeCliCommand::COVERAGE);
+     }
++    else if (subCmd == "ims-register")
++    {
++        return std::make_unique<UeCliCommand>(UeCliCommand::IMS_REGISTER);
++    }
++    else if (subCmd == "ims-call")
++    {
++        auto cmd = std::make_unique<UeCliCommand>(UeCliCommand::IMS_CALL);
++        if (options.positionalCount() != 1)
++            CMD_ERR("An SIP URI is expected, e.g. sip:001011234567896@ims.mnc001.mcc001.3gppnetwork.org")
++        cmd->callUri = options.getPositional(0);
++        return cmd;
++    }
++    else if (subCmd == "ims-answer")
++    {
++        return std::make_unique<UeCliCommand>(UeCliCommand::IMS_ANSWER);
++    }
++    else if (subCmd == "ims-hangup")
++    {
++        return std::make_unique<UeCliCommand>(UeCliCommand::IMS_HANGUP);
++    }
++    else if (subCmd == "ims-status")
++    {
++        return std::make_unique<UeCliCommand>(UeCliCommand::IMS_STATUS);
++    }
+ 
+     return nullptr;
+ }
+diff --git a/src/lib/app/cli_cmd.hpp b/src/lib/app/cli_cmd.hpp
+index fa29239..cff6a81 100644
+--- a/src/lib/app/cli_cmd.hpp
++++ b/src/lib/app/cli_cmd.hpp
+@@ -56,6 +56,11 @@ struct UeCliCommand
+         DE_REGISTER,
+         RLS_STATE,
+         COVERAGE,
++        IMS_REGISTER,
++        IMS_CALL,
++        IMS_ANSWER,
++        IMS_HANGUP,
++        IMS_STATUS,
+     } present;
+ 
+     // DE_REGISTER
+@@ -70,6 +75,9 @@ struct UeCliCommand
+     std::optional<std::string> apn{};
+     bool isEmergency{};
+ 
++    // IMS_CALL
++    std::string callUri{};
++
+     explicit UeCliCommand(PR present) : present(present)
+     {
+     }
+diff --git a/src/lib/nas/proto_conf.cpp b/src/lib/nas/proto_conf.cpp
+index 53d4624..509199a 100644
+--- a/src/lib/nas/proto_conf.cpp
++++ b/src/lib/nas/proto_conf.cpp
+@@ -44,12 +44,12 @@ OctetString nas::ProtocolConfigurationOptions::encode()
+     return stream;
+ }
+ 
+-std::unique_ptr<nas::ProtocolConfigurationOptions> nas::ProtocolConfigurationOptions::Decode(uint8_t *data, size_t len,
++std::unique_ptr<nas::ProtocolConfigurationOptions> nas::ProtocolConfigurationOptions::Decode(const uint8_t *data, size_t len,
+                                                                                              bool isUplink)
+ {
+     auto res = std::make_unique<ProtocolConfigurationOptions>();
+ 
+-    OctetView buff{data, len};
++    OctetView buff{const_cast<uint8_t *>(data), len};
+ 
+     while (buff.hasNext())
+     {
+diff --git a/src/lib/nas/proto_conf.hpp b/src/lib/nas/proto_conf.hpp
+index b99358c..0f04517 100644
+--- a/src/lib/nas/proto_conf.hpp
++++ b/src/lib/nas/proto_conf.hpp
+@@ -123,7 +123,7 @@ class ProtocolConfigurationOptions
+     static inline bool IsTwoOctetLengthContainerId(int id, bool isUplink);
+ 
+   public:
+-    static std::unique_ptr<ProtocolConfigurationOptions> Decode(uint8_t *data, size_t len, bool isUplink);
++    static std::unique_ptr<ProtocolConfigurationOptions> Decode(const uint8_t *data, size_t len, bool isUplink);
+ 
+     OctetString encode();
+ };
+diff --git a/src/ue.cpp b/src/ue.cpp
+index d9e3f85..4efe6d2 100644
+--- a/src/ue.cpp
++++ b/src/ue.cpp
+@@ -224,6 +224,35 @@ static nr::ue::UeConfig *ReadConfigYaml()
+         }
+     }
+ 
++    if (yaml::HasField(config, "ims"))
++    {
++        auto ims = config["ims"];
++        if (yaml::HasField(ims, "enable"))
++            result->ims.enable = yaml::GetBool(ims, "enable");
++        if (yaml::HasField(ims, "sipPort"))
++            result->ims.sipPort = yaml::GetInt32(ims, "sipPort", 1, 65535);
++        if (yaml::HasField(ims, "mediaPort"))
++            result->ims.mediaPort = yaml::GetInt32(ims, "mediaPort", 1024, 65535);
++        if (yaml::HasField(ims, "pcscf"))
++            result->ims.pcscf = yaml::GetIpAddress(ims, "pcscf");
++        if (yaml::HasField(ims, "pcscfPort"))
++            result->ims.pcscfPort = yaml::GetInt32(ims, "pcscfPort", 1, 65535);
++        if (yaml::HasField(ims, "registrar"))
++            result->ims.registrar = yaml::GetString(ims, "registrar");
++        if (yaml::HasField(ims, "publicIdentity"))
++            result->ims.publicIdentity = yaml::GetString(ims, "publicIdentity");
++        if (yaml::HasField(ims, "privateIdentity"))
++            result->ims.privateIdentity = yaml::GetString(ims, "privateIdentity");
++        if (yaml::HasField(ims, "realm"))
++            result->ims.realm = yaml::GetString(ims, "realm");
++        if (yaml::HasField(ims, "password"))
++            result->ims.password = yaml::GetString(ims, "password");
++        if (yaml::HasField(ims, "expires"))
++            result->ims.expires = yaml::GetInt32(ims, "expires", 1, 86400);
++        if (yaml::HasField(ims, "autoAnswer"))
++            result->ims.autoAnswer = yaml::GetBool(ims, "autoAnswer");
++    }
++
+     yaml::AssertHasField(config, "integrityMaxRate");
+     {
+         auto uplink = yaml::GetString(config["integrityMaxRate"], "uplink");
+@@ -380,6 +409,7 @@ static nr::ue::UeConfig *GetConfigByUe(int ueIndex)
+     c->integrityMaxRate = g_refConfig->integrityMaxRate;
+     c->uacAic = g_refConfig->uacAic;
+     c->uacAcc = g_refConfig->uacAcc;
++    c->ims = g_refConfig->ims;
+ 
+     if (c->supi.has_value())
+         IncrementNumber(c->supi->value, ueIndex);
+diff --git a/src/ue/app/cmd_handler.cpp b/src/ue/app/cmd_handler.cpp
+index d2ed0c6..6387482 100644
+--- a/src/ue/app/cmd_handler.cpp
++++ b/src/ue/app/cmd_handler.cpp
+@@ -9,6 +9,7 @@
+ #include "cmd_handler.hpp"
+ 
+ #include <ue/app/task.hpp>
++#include <ue/ims/ims.hpp>
+ #include <ue/nas/task.hpp>
+ #include <ue/rls/task.hpp>
+ #include <ue/rrc/task.hpp>
+@@ -49,6 +50,8 @@ void UeCmdHandler::pauseTasks()
+     m_base->nasTask->requestPause();
+     m_base->rrcTask->requestPause();
+     m_base->rlsTask->requestPause();
++    if (m_base->imsTask)
++        m_base->imsTask->requestPause();
+ }
+ 
+ void UeCmdHandler::unpauseTasks()
+@@ -56,6 +59,8 @@ void UeCmdHandler::unpauseTasks()
+     m_base->nasTask->requestUnpause();
+     m_base->rrcTask->requestUnpause();
+     m_base->rlsTask->requestUnpause();
++    if (m_base->imsTask)
++        m_base->imsTask->requestUnpause();
+ }
+ 
+ bool UeCmdHandler::isAllPaused()
+@@ -66,6 +71,8 @@ bool UeCmdHandler::isAllPaused()
+         return false;
+     if (!m_base->rlsTask->isPauseConfirmed())
+         return false;
++    if (m_base->imsTask && !m_base->imsTask->isPauseConfirmed())
++        return false;
+     return true;
+ }
+ 
+@@ -267,6 +274,22 @@ void UeCmdHandler::handleCmdImpl(NmUeCliCommand &msg)
+         sendResult(msg.address, json.dumpYaml());
+         break;
+     }
++    case app::UeCliCommand::IMS_REGISTER:
++    case app::UeCliCommand::IMS_CALL:
++    case app::UeCliCommand::IMS_ANSWER:
++    case app::UeCliCommand::IMS_HANGUP:
++    case app::UeCliCommand::IMS_STATUS: {
++        if (!m_base->imsTask)
++        {
++            sendError(msg.address, "IMS is not enabled");
++            break;
++        }
++        auto m = std::make_unique<NmUeAppToIms>(NmUeAppToIms::CLI_COMMAND);
++        m->cmd = std::move(msg.cmd);
++        m->address = msg.address;
++        m_base->imsTask->push(std::move(m));
++        break;
++    }
+     }
+ }
+ 
+diff --git a/src/ue/app/task.cpp b/src/ue/app/task.cpp
+index a69bf4e..732bd66 100644
+--- a/src/ue/app/task.cpp
++++ b/src/ue/app/task.cpp
+@@ -8,7 +8,11 @@
+ 
+ #include "task.hpp"
+ #include "cmd_handler.hpp"
++#include <ue/ims/ims.hpp>
++#include <ue/ims/packet.hpp>
+ #include <cctype>
++#include <chrono>
++#include <cstring>
+ #include <lib/nas/utils.hpp>
+ #include <ue/nas/task.hpp>
+ #include <ue/rls/task.hpp>
+@@ -20,6 +24,12 @@
+ static constexpr const int SWITCH_OFF_TIMER_ID = 1;
+ static constexpr const int SWITCH_OFF_DELAY = 500;
+ 
++static int NowMillis()
++{
++    using namespace std::chrono;
++    return (int)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
++}
++
+ static std::string SanitizeNamespaceToken(const std::string &value)
+ {
+     std::string sanitized;
+@@ -74,12 +84,105 @@ void UeAppTask::onQuit()
+     }
+ }
+ 
++OctetString UeAppTask::reassembleIpv4Fragment(OctetString packet)
++{
++    if (packet.length() < 20)
++        return packet;
++    const uint8_t *d = packet.data();
++    if ((d[0] >> 4) != 4)
++        return packet;
++
++    int ihl = (d[0] & 0x0F) * 4;
++    if (ihl < 20 || (int)packet.length() < ihl)
++        return packet;
++    int totalLen = (d[2] << 8) | d[3];
++    if (totalLen > (int)packet.length() || totalLen < ihl)
++        return packet;
++
++    bool moreFrag = (d[6] & 0x20) != 0;
++    int offset = (((d[6] & 0x1F) << 8) | d[7]) * 8;
++    if (!moreFrag && offset == 0)
++        return packet; // not fragmented
++
++    uint32_t key = (d[12] << 24) | (d[13] << 16) | (d[14] << 8) | d[15];
++    key = (key << 16) | (d[4] << 8) | d[5];
++
++    auto it = m_fragBufs.find(key);
++    if (it == m_fragBufs.end())
++    {
++        Ipv4FragmentBuf buf;
++        buf.key = key;
++        it = m_fragBufs.emplace(key, std::move(buf)).first;
++    }
++    Ipv4FragmentBuf &buf = it->second;
++    buf.lastSeen = NowMillis();
++
++    int fragLen = totalLen - ihl;
++    int end = offset + fragLen;
++    if (end > (int)buf.data.size())
++        buf.data.resize(end);
++    std::memcpy(buf.data.data() + offset, d + ihl, fragLen);
++
++    if (offset == 0 && ihl == 20)
++        std::memcpy(buf.ipHeader, d, 20);
++    buf.fragCount++;
++
++    if (!moreFrag)
++    {
++        buf.gotLast = true;
++        buf.totalLen = end;
++    }
++
++    if (!buf.gotLast || (int)buf.data.size() < buf.totalLen)
++        return OctetString{}; // still incomplete
++
++    std::vector<uint8_t> raw;
++    raw.reserve(20 + buf.totalLen);
++    raw.insert(raw.end(), buf.ipHeader, buf.ipHeader + 20);
++    raw.insert(raw.end(), buf.data.begin(), buf.data.begin() + buf.totalLen);
++    m_fragBufs.erase(key);
++
++    // Fix the IP header for the reassembled datagram: clear fragmentation fields, set total length,
++    // and recompute the header checksum.
++    uint8_t *h = raw.data();
++    int len = 20 + buf.totalLen;
++    h[2] = (uint8_t)((len >> 8) & 0xFF);
++    h[3] = (uint8_t)(len & 0xFF);
++    h[6] = 0; // MF
++    h[7] = 0; // frag offset
++    int sum = 0;
++    for (int i = 0; i < 20; i += 2)
++    {
++        int word = ((h[i] & 0xFF) << 8) | (h[i + 1] & 0xFF);
++        sum += word;
++        while (sum > 0xFFFF)
++            sum = (sum & 0xFFFF) + (sum >> 16);
++    }
++    sum = ~sum & 0xFFFF;
++    h[10] = (uint8_t)((sum >> 8) & 0xFF);
++    h[11] = (uint8_t)(sum & 0xFF);
++    return OctetString(std::move(raw));
++}
++
+ void UeAppTask::onLoop()
+ {
+     auto msg = take();
+     if (!msg)
+         return;
+ 
++    // Expire stale fragment buffers (30 s without completion).
++    if (m_fragBufs.size() > 0 && (NowMillis() % 1000) < 50)
++    {
++        auto now = NowMillis();
++        for (auto it = m_fragBufs.begin(); it != m_fragBufs.end();)
++        {
++            if (now - it->second.lastSeen > 30000)
++                it = m_fragBufs.erase(it);
++            else
++                ++it;
++        }
++    }
++
+     switch (msg->msgType)
+     {
+     case NtsMessageType::UE_TUN_TO_APP: {
+@@ -109,12 +212,31 @@ void UeAppTask::onLoop()
+             break;
+         }
+         case NmUeNasToApp::DOWNLINK_DATA_DELIVERY: {
++            OctetString data = std::move(w.data);
++            if (m_base->imsTask && w.psi == m_imsPsi)
++            {
++                data = reassembleIpv4Fragment(std::move(data));
++                // P3: SIP (sipPort) and media (mediaPort) both belong to the IMS task.
++                if (data.length() > 0 &&
++                    (ims::IsUdpPacket(data, m_base->config->ims.sipPort) ||
++                     ims::IsUdpPacket(data, m_base->config->ims.mediaPort)))
++                {
++                    auto m = std::make_unique<NmUeAppToIms>(NmUeAppToIms::DOWNLINK_DATA);
++                    m->psi = w.psi;
++                    m->data = std::move(data);
++                    m_base->imsTask->push(std::move(m));
++                    break;
++                }
++                if (data.length() == 0)
++                    break; // fragment held for reassembly
++            }
++
+             auto *tunTask = m_tunTasks[w.psi];
+             if (tunTask)
+             {
+                 auto m = std::make_unique<NmAppToTun>(NmAppToTun::DATA_PDU_DELIVERY);
+                 m->psi = w.psi;
+-                m->data = std::move(w.data);
++                m->data = std::move(data);
+                 tunTask->push(std::move(m));
+             }
+             break;
+@@ -154,11 +276,32 @@ void UeAppTask::receiveStatusUpdate(NmUeStatusUpdate &msg)
+         auto *session = msg.pduSession;
+ 
+         setupTunInterface(session);
++
++        if (m_base->imsTask && session->apn.has_value() && *session->apn == "ims" && session->pduAddress.has_value())
++        {
++            m_imsPsi = session->psi;
++            auto m = std::make_unique<NmUeAppToIms>(NmUeAppToIms::SESSION_BOUND);
++            m->psi = session->psi;
++            m->localIp = utils::OctetStringToIp(session->pduAddress->pduAddressInformation);
++            m->pcscf = session->epcoPcscf.value_or("");
++            m_base->imsTask->push(std::move(m));
++        }
+         return;
+     }
+ 
+     if (msg.what == NmUeStatusUpdate::SESSION_RELEASE)
+     {
++        if (m_imsPsi == msg.psi)
++        {
++            m_imsPsi = -1;
++            if (m_base->imsTask)
++            {
++                auto m = std::make_unique<NmUeAppToIms>(NmUeAppToIms::SESSION_RELEASED);
++                m->psi = msg.psi;
++                m_base->imsTask->push(std::move(m));
++            }
++        }
++
+         if (m_tunTasks[msg.psi] != nullptr)
+         {
+             m_tunTasks[msg.psi]->quit();
+diff --git a/src/ue/app/task.hpp b/src/ue/app/task.hpp
+index 82f7342..1fb9538 100644
+--- a/src/ue/app/task.hpp
++++ b/src/ue/app/task.hpp
+@@ -21,6 +21,19 @@
+ namespace nr::ue
+ {
+ 
++// IPv4 reassembly buffer for IMS downlink fragments (large SIP packets exceed path MTU
++// and arrive IP-fragmented; the IMS path bypasses the kernel IP stack so we must reassemble).
++struct Ipv4FragmentBuf
++{
++    uint32_t key{0};       // (srcIP << 16) | ipId
++    int lastSeen{0};       // ms timestamp for expiry
++    int fragCount{0};
++    bool gotLast{false};
++    int totalLen{0};       // expected reassembled length
++    std::vector<uint8_t> data; // reassembly buffer (payload, frag offsets spliced)
++    uint8_t ipHeader[20]{}; // IP header from the first fragment
++};
++
+ class UeAppTask : public NtsTask
+ {
+   private:
+@@ -29,6 +42,8 @@ class UeAppTask : public NtsTask
+ 
+     std::array<TunTask *, 16> m_tunTasks{};
+     ECmState m_cmState{};
++    int m_imsPsi{-1};
++    std::unordered_map<uint32_t, Ipv4FragmentBuf> m_fragBufs;
+ 
+     friend class UeCmdHandler;
+ 
+@@ -44,6 +59,7 @@ class UeAppTask : public NtsTask
+   private:
+     void receiveStatusUpdate(NmUeStatusUpdate &msg);
+     void setupTunInterface(const PduSession *pduSession);
++    OctetString reassembleIpv4Fragment(OctetString packet);
+ };
+ 
+ } // namespace nr::ue
+diff --git a/src/ue/ims/auth.cpp b/src/ue/ims/auth.cpp
+new file mode 100644
+index 0000000..2daddf1
+--- /dev/null
++++ b/src/ue/ims/auth.cpp
+@@ -0,0 +1,238 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#include "auth.hpp"
++
++#include <atomic>
++#include <cctype>
++#include <cstring>
++#include <chrono>
++
++#include <lib/crypt/milenage.hpp>
++
++#include "digest.hpp"
++
++namespace nr::ue
++{
++namespace ims
++{
++
++namespace
++{
++
++std::string GenerateId()
++{
++    static std::atomic<uint64_t> counter{0};
++    auto now =
++        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
++            .count();
++    return std::to_string(now) + "-" + std::to_string(counter.fetch_add(1));
++}
++
++// Parses "RAND||AUTN" from an AKAv1 nonce. kamailio/pyHSS deliver the 32-byte pair either
++// as Base64 (pyHSS AVP 609 -> S-CSCF nonce) or as 64 hex chars. Returns the 16-byte halves.
++bool ParseAkaNonce(const std::string &nonce, OctetString &rand, OctetString &autn)
++{
++    std::vector<uint8_t> raw;
++    auto tryHex = [&]() {
++        if (nonce.size() != 64)
++            return false;
++        for (char c : nonce)
++            if (!std::isxdigit(static_cast<unsigned char>(c)))
++                return false;
++        OctetString h = OctetString::FromHex(nonce);
++        if (h.length() != 32)
++            return false;
++        raw.assign(h.data(), h.data() + 32);
++        return true;
++    };
++    auto tryBase64 = [&]() {
++        if (nonce.size() % 4 != 0)
++            return false;
++        static const char *tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++        int val = 0, bits = 0;
++        for (char c : nonce)
++        {
++            if (c == '=')
++                break;
++            const char *p = std::strchr(tbl, c);
++            if (!p)
++                return false;
++            val = (val << 6) | static_cast<int>(p - tbl);
++            bits += 6;
++            if (bits >= 8)
++            {
++                bits -= 8;
++                raw.push_back(static_cast<uint8_t>((val >> bits) & 0xFF));
++            }
++        }
++        return raw.size() == 32;
++    };
++
++    if (tryHex() || tryBase64())
++    {
++        rand = OctetString{std::vector<uint8_t>(raw.begin(), raw.begin() + 16)};
++        autn = OctetString{std::vector<uint8_t>(raw.begin() + 16, raw.end())};
++        return true;
++    }
++    return false;
++}
++
++} // namespace
++
++DigestAuth::DigestAuth(std::string username, std::string password)
++    : m_username(std::move(username)), m_password(std::move(password))
++{
++}
++
++void DigestAuth::setAkaCredentials(const OctetString &opc, const OctetString &amf)
++{
++    m_opcHex = opc.toHexString();
++    m_amfHex = amf.toHexString();
++}
++
++bool DigestAuth::beginChallenge(const SipAuthChallenge &challenge, const std::string &fallbackRealm)
++{
++    if (challenge.nonce.empty())
++        return false;
++    if (!challenge.qopOptions.empty())
++    {
++        bool hasAuth = false;
++        for (auto &opt : challenge.qopOptions)
++        {
++            if (opt == "auth")
++            {
++                hasAuth = true;
++                break;
++            }
++        }
++        if (!hasAuth)
++            return false;
++    }
++
++    m_nonce = challenge.nonce;
++    m_realm = challenge.realm.empty() ? fallbackRealm : challenge.realm;
++    m_cnonce = GenerateId();
++    m_nc = 0;
++    m_hasChallenge = true;
++
++    // IMS AKA (RFC 3310): nonce carries RAND||AUTN; the digest password is derived from IK/CK.
++    m_aka = challenge.algorithm == "AKAv1-MD5";
++    m_akaReady = false;
++    if (m_aka)
++    {
++        if (m_opcHex.length() != 32 || !ParseAkaNonce(m_nonce, m_rand, m_autn))
++            return false; // unusable AKA challenge
++        m_akaReady = true;
++    }
++    return true;
++}
++
++bool DigestAuth::validateAutn() 
++{
++    if (!m_akaReady)
++        return false;
++
++    // AUTN = SQN||AMF||MAC-A (6+2+8 bytes). AK = f5(K, RAND), independent of SQN.
++    static const OctetString zero6{OctetString::FromHex("000000000000")};
++    static const OctetString zero2{OctetString::FromHex("0000")};
++    OctetString opc = OctetString::FromHex(m_opcHex);
++    auto m0 = crypto::milenage::Calculate(opc, OctetString::FromHex(m_password), m_rand, zero6, zero2);
++    OctetString sqn = OctetString::Xor(m_autn.subCopy(0, 6), m0.ak);
++    OctetString amf = m_autn.subCopy(6, 2);
++    auto m = crypto::milenage::Calculate(opc, OctetString::FromHex(m_password), m_rand, sqn, amf);
++
++    // Separation bit (AMF MSB, 3GPP 33.102) must be set.
++    if (amf.length() > 0 && (amf.get(0).bit(7) != 1))
++        return false;
++
++    // MAC-A check.
++    if (m.mac_a != m_autn.subCopy(8, 8))
++        return false;
++
++    // The deployed S-CSCF (kamailio ims_auth) verifies AKA digests against the XRES raw
++    // bytes used as the digest password — not hex, not the RFC 3310 IK/CK-derived RK.
++    // Empirically matched (python-verified) against the test S-CSCF.
++    m_rkPassword.assign(reinterpret_cast<const char *>(m.res.data()), m.res.length());
++    return true;
++}
++
++std::string DigestAuth::authorization(const std::string &method, const std::string &uri)
++{
++    if (!m_hasChallenge)
++        return {};
++
++    std::string nc = nextNonceCount();
++    std::string algo = "MD5";
++    std::string pass = m_password;
++    if (m_aka)
++    {
++        if (!m_akaReady || !validateAutn())
++            return {};
++        algo = "AKAv1-MD5";
++        pass = m_rkPassword;
++    }
++
++    std::string response = DigestResponse(m_username, m_realm, pass, m_nonce, nc, m_cnonce, "auth", method, uri);
++
++    return "Digest username=\"" + m_username + "\", realm=\"" + m_realm + "\", nonce=\"" + m_nonce +
++           "\", uri=\"" + uri + "\", response=\"" + response + "\", algorithm=" + algo + ", cnonce=\"" + m_cnonce +
++           "\", nc=" + nc + ", qop=auth";
++}
++
++bool DigestAuth::hasChallenge() const
++{
++    return m_hasChallenge;
++}
++
++bool DigestAuth::isAka() const
++{
++    return m_aka;
++}
++
++void DigestAuth::reset()
++{
++    m_nonce.clear();
++    m_realm.clear();
++    m_cnonce.clear();
++    m_nc = 0;
++    m_hasChallenge = false;
++    m_aka = false;
++    m_akaReady = false;
++}
++
++std::string DigestAuth::nextNonceCount()
++{
++    m_nc++;
++    static const char *hex = "0123456789abcdef";
++    std::string out;
++    out.reserve(8);
++    uint32_t v = static_cast<uint32_t>(m_nc);
++    for (int i = 6; i >= 0; i -= 2)
++    {
++        out.push_back(hex[(v >> (i + 4)) & 0xF]);
++        out.push_back(hex[(v >> i) & 0xF]);
++    }
++    return out;
++}
++
++std::string DeriveRfc3310Password(const OctetString &ik, const OctetString &ck)
++{
++    // RFC 3310 6.1: password = MD5(hex(ik) + ":" + hex(ck)) with lower-case hex.
++    auto toLowerHex = [](const OctetString &v) {
++        std::string h = v.toHexString();
++        for (auto &c : h)
++            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
++        return h;
++    };
++    std::string input = toLowerHex(ik) + ":" + toLowerHex(ck);
++    return Md5Hex(input);
++}
++
++} // namespace ims
++} // namespace nr::ue
+diff --git a/src/ue/ims/auth.hpp b/src/ue/ims/auth.hpp
+new file mode 100644
+index 0000000..0095839
+--- /dev/null
++++ b/src/ue/ims/auth.hpp
+@@ -0,0 +1,77 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#pragma once
++
++#include <string>
++
++#include <utils/octet_string.hpp>
++
++#include "sip_stack.hpp"
++
++namespace nr::ue
++{
++namespace ims
++{
++
++// Stateful Digest access authentication (RFC 2617, qop=auth) with 3GPP IMS AKA
++// (Digest-AKAv1-MD5, RFC 3310) support. Holds one challenge's state (nonce/realm/cnonce/nc)
++// and produces the Authorization header value.
++class DigestAuth
++{
++  public:
++    DigestAuth(std::string username, std::string password);
++
++    // Installs the AKA credentials (OPc and AMF); enables AKAv1-MD5 challenge handling.
++    void setAkaCredentials(const OctetString &opc, const OctetString &amf);
++
++    // Adopts a 401 challenge. Returns false if the challenge is unusable (missing nonce,
++    // or a non-empty qop list without "auth"). On success the nc counter resets and a fresh
++    // cnonce is generated. For algorithm=AKAv1-MD5 the nonce must be RAND||AUTN (64 hex).
++    bool beginChallenge(const SipAuthChallenge &challenge, const std::string &fallbackRealm);
++
++    // Builds the full Authorization header value for the given method/uri. Empty string if
++    // no usable challenge has been adopted.
++    std::string authorization(const std::string &method, const std::string &uri);
++
++    bool hasChallenge() const;
++
++    // Returns true when the adopted challenge is AKA (AKAv1-MD5).
++    bool isAka() const;
++
++    // Validates AUTN (SEP bit + MAC). Returns true on success. Only meaningful after beginChallenge.
++    bool validateAutn();
++
++    void reset();
++
++  private:
++    std::string nextNonceCount();
++
++    std::string m_username;
++    std::string m_password; // Ki (MD5 mode) or RK-derived password (AKA mode, computed per challenge)
++    std::string m_nonce;
++    std::string m_realm;
++    std::string m_cnonce;
++    int m_nc{0};
++    bool m_hasChallenge{false};
++
++    // AKA state
++    bool m_aka{false};
++    bool m_akaReady{false};
++    std::string m_opcHex;
++    std::string m_amfHex;
++    OctetString m_rand;
++    OctetString m_autn;
++    std::string m_rkPassword; // RFC 3310 derived password
++};
++
++// RFC 3310: password = MD5(hex(ik) + ":" + hex(ck)) (lower-case hex, colon-separated).
++std::string DeriveRfc3310Password(const OctetString &ik, const OctetString &ck);
++
++} // namespace ims
++} // namespace nr::ue
+diff --git a/src/ue/ims/config.hpp b/src/ue/ims/config.hpp
+new file mode 100644
+index 0000000..67382fa
+--- /dev/null
++++ b/src/ue/ims/config.hpp
+@@ -0,0 +1,32 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#pragma once
++
++#include <string>
++
++namespace nr::ue
++{
++
++struct ImsConfig
++{
++    bool enable{false};
++    int sipPort{5060};
++    int mediaPort{50000};
++    std::string pcscf{};
++    int pcscfPort{5060};
++    std::string registrar{};
++    std::string publicIdentity{};
++    std::string privateIdentity{};
++    std::string realm{};
++    std::string password{};
++    int expires{300};
++    bool autoAnswer{true};
++};
++
++} // namespace nr::ue
+diff --git a/src/ue/ims/digest.cpp b/src/ue/ims/digest.cpp
+new file mode 100644
+index 0000000..97c6300
+--- /dev/null
++++ b/src/ue/ims/digest.cpp
+@@ -0,0 +1,184 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#include "digest.hpp"
++
++#include <cmath>
++#include <cstring>
++
++namespace nr::ue
++{
++namespace ims
++{
++
++namespace
++{
++
++constexpr const uint32_t MD5_A = 0x67452301;
++constexpr const uint32_t MD5_B = 0xefcdab89;
++constexpr const uint32_t MD5_C = 0x98badcfe;
++constexpr const uint32_t MD5_D = 0x10325476;
++
++constexpr const uint8_t SHIFT[64] = {7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
++                                     5, 9,  14, 20, 5, 9,  14, 20, 5, 9,  14, 20, 5, 9,  14, 20,
++                                     4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
++                                     6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21};
++
++// T[i] = floor(2^32 * |sin(i)|), i in [1..64]
++uint32_t MakeT(int i)
++{
++    return static_cast<uint32_t>(4294967296.0 * std::abs(std::sin(static_cast<double>(i))));
++}
++
++uint32_t RotateLeft(uint32_t value, int shift)
++{
++    return (value << shift) | (value >> (32 - shift));
++}
++
++void AppendHex(std::string &out, uint8_t b)
++{
++    static const char *hex = "0123456789abcdef";
++    out.push_back(hex[(b >> 4) & 0xF]);
++    out.push_back(hex[b & 0xF]);
++}
++
++} // namespace
++
++Md5::Md5() : m_state{MD5_A, MD5_B, MD5_C, MD5_D}, m_bitLen(0), m_bufferLen(0), m_finalized(false)
++{
++}
++
++void Md5::update(const uint8_t *data, size_t len)
++{
++    if (m_finalized || data == nullptr)
++        return;
++
++    while (len > 0)
++    {
++        size_t space = 64 - m_bufferLen;
++        size_t chunk = (len < space) ? len : space;
++        std::memcpy(m_buffer + m_bufferLen, data, chunk);
++        m_bufferLen += chunk;
++        data += chunk;
++        len -= chunk;
++        m_bitLen += static_cast<uint64_t>(chunk) * 8;
++
++        if (m_bufferLen == 64)
++        {
++            transform(m_buffer);
++            m_bufferLen = 0;
++        }
++    }
++}
++
++void Md5::update(const std::string &data)
++{
++    update(reinterpret_cast<const uint8_t *>(data.data()), data.size());
++}
++
++void Md5::finalize(uint8_t out[16])
++{
++    uint64_t bitLen = m_bitLen;
++    uint8_t padding = 0x80;
++    update(&padding, 1);
++
++    uint8_t zero = 0;
++    while (m_bufferLen != 56)
++        update(&zero, 1);
++
++    uint8_t lenBuf[8];
++    for (int i = 0; i < 8; i++)
++        lenBuf[i] = static_cast<uint8_t>((bitLen >> (8 * i)) & 0xFF);
++    update(lenBuf, 8);
++
++    for (int i = 0; i < 4; i++)
++    {
++        out[i * 4 + 0] = static_cast<uint8_t>((m_state[i] >> 0) & 0xFF);
++        out[i * 4 + 1] = static_cast<uint8_t>((m_state[i] >> 8) & 0xFF);
++        out[i * 4 + 2] = static_cast<uint8_t>((m_state[i] >> 16) & 0xFF);
++        out[i * 4 + 3] = static_cast<uint8_t>((m_state[i] >> 24) & 0xFF);
++    }
++
++    m_finalized = true;
++}
++
++void Md5::transform(const uint8_t block[64])
++{
++    uint32_t M[16];
++    for (int i = 0; i < 16; i++)
++        M[i] = static_cast<uint32_t>(block[i * 4]) | (static_cast<uint32_t>(block[i * 4 + 1]) << 8) |
++               (static_cast<uint32_t>(block[i * 4 + 2]) << 16) | (static_cast<uint32_t>(block[i * 4 + 3]) << 24);
++
++    uint32_t a = m_state[0];
++    uint32_t b = m_state[1];
++    uint32_t c = m_state[2];
++    uint32_t d = m_state[3];
++
++    for (int i = 0; i < 64; i++)
++    {
++        uint32_t f;
++        int g;
++        if (i < 16)
++        {
++            f = (b & c) | (~b & d);
++            g = i;
++        }
++        else if (i < 32)
++        {
++            f = (d & b) | (~d & c);
++            g = (5 * i + 1) % 16;
++        }
++        else if (i < 48)
++        {
++            f = b ^ c ^ d;
++            g = (3 * i + 5) % 16;
++        }
++        else
++        {
++            f = c ^ (b | ~d);
++            g = (7 * i) % 16;
++        }
++
++        uint32_t tmp = d;
++        d = c;
++        c = b;
++        b = b + RotateLeft(a + f + M[g] + MakeT(i + 1), SHIFT[i]);
++        a = tmp;
++    }
++
++    m_state[0] += a;
++    m_state[1] += b;
++    m_state[2] += c;
++    m_state[3] += d;
++}
++
++std::string Md5Hex(const std::string &input)
++{
++    Md5 md5;
++    md5.update(input);
++    uint8_t digest[16];
++    md5.finalize(digest);
++
++    std::string result;
++    result.reserve(32);
++    for (uint8_t b : digest)
++        AppendHex(result, b);
++    return result;
++}
++
++std::string DigestResponse(const std::string &username, const std::string &realm, const std::string &password,
++                           const std::string &nonce, const std::string &nc, const std::string &cnonce,
++                           const std::string &qop, const std::string &method, const std::string &uri)
++{
++    std::string ha1 = Md5Hex(username + ":" + realm + ":" + password);
++    std::string ha2 = Md5Hex(method + ":" + uri);
++    return Md5Hex(ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2);
++}
++
++} // namespace ims
++} // namespace nr::ue
+diff --git a/src/ue/ims/digest.hpp b/src/ue/ims/digest.hpp
+new file mode 100644
+index 0000000..36cf7f1
+--- /dev/null
++++ b/src/ue/ims/digest.hpp
+@@ -0,0 +1,49 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#pragma once
++
++#include <cstdint>
++#include <string>
++
++namespace nr::ue
++{
++namespace ims
++{
++
++// RFC 1321 MD5 message digest (self-implemented, no external dependency).
++class Md5
++{
++  public:
++    Md5();
++
++    void update(const uint8_t *data, size_t len);
++    void update(const std::string &data);
++
++    // Writes the 16-byte digest to out.
++    void finalize(uint8_t out[16]);
++
++  private:
++    void transform(const uint8_t block[64]);
++
++    uint32_t m_state[4];
++    uint64_t m_bitLen;
++    uint8_t m_buffer[64];
++    size_t m_bufferLen;
++    bool m_finalized;
++};
++
++std::string Md5Hex(const std::string &input);
++
++// Digest access authentication response for qop=auth (RFC 2617).
++std::string DigestResponse(const std::string &username, const std::string &realm, const std::string &password,
++                           const std::string &nonce, const std::string &nc, const std::string &cnonce,
++                           const std::string &qop, const std::string &method, const std::string &uri);
++
++} // namespace ims
++} // namespace nr::ue
+diff --git a/src/ue/ims/ims.cpp b/src/ue/ims/ims.cpp
+new file mode 100644
+index 0000000..930d8a4
+--- /dev/null
++++ b/src/ue/ims/ims.cpp
+@@ -0,0 +1,880 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#include "ims.hpp"
++
++#include <lib/app/cli_base.hpp>
++#include <lib/crypt/milenage.hpp>
++#include <ue/nas/task.hpp>
++#include <utils/common.hpp>
++
++#include "digest.hpp"
++#include "packet.hpp"
++#include "sip_stack.hpp"
++
++namespace nr::ue
++{
++
++namespace
++{
++
++// Strips the ";tag=xxx" suffix (and any display-name) from a header value, keeping the SIP URI.
++std::string StripUriTag(const std::string &header)
++{
++    auto tagPos = header.rfind(";tag=");
++    std::string val = tagPos == std::string::npos ? header : header.substr(0, tagPos);
++    val = val.substr(val.find_last_of('<') + 1);
++    if (!val.empty() && val.back() == '>')
++        val.pop_back();
++    return val;
++}
++
++// Joins a Record-Route list into the comma-separated route set used by in-dialog requests.
++// The callee (UAS) must use the reversed order (its own P-CSCF first).
++std::string JoinRouteSet(const std::vector<std::string> &routes, bool reverse)
++{
++    std::string out;
++    if (reverse)
++    {
++        for (auto it = routes.rbegin(); it != routes.rend(); ++it)
++            out += out.empty() ? *it : "," + *it;
++    }
++    else
++    {
++        for (const auto &r : routes)
++            out += out.empty() ? r : "," + r;
++    }
++    return out;
++}
++
++} // namespace
++
++ImsClientTask::ImsClientTask(TaskBase *base)
++    : m_base{base}, m_regAuth(base->config->ims.privateIdentity, base->config->ims.password),
++      m_callAuth(base->config->ims.privateIdentity, base->config->ims.password), m_media{base}
++{
++    m_logger = m_base->logBase->makeUniqueLogger(m_base->config->getLoggerPrefix() + "ims");
++
++    // IMS AKA credentials: OPc derived from op/key (reusing the NAS-layer credentials).
++    if (m_base->config->key.length() == 16 && m_base->config->opC.length() == 16)
++    {
++        if (m_base->config->opType == OpType::OPC)
++        {
++            m_regAuth.setAkaCredentials(m_base->config->opC, m_base->config->amf);
++            m_callAuth.setAkaCredentials(m_base->config->opC, m_base->config->amf);
++        }
++        else
++        {
++            auto opc = crypto::milenage::CalculateOpC(m_base->config->opC, m_base->config->key);
++            m_regAuth.setAkaCredentials(opc, m_base->config->amf);
++            m_callAuth.setAkaCredentials(opc, m_base->config->amf);
++        }
++    }
++}
++
++void ImsClientTask::onStart()
++{
++}
++
++void ImsClientTask::onQuit()
++{
++}
++
++void ImsClientTask::onLoop()
++{
++    auto msg = take();
++    if (!msg)
++        return;
++
++    switch (msg->msgType)
++    {
++    case NtsMessageType::UE_APP_TO_IMS:
++        handleMessage(*msg);
++        break;
++    case NtsMessageType::TIMER_EXPIRED:
++        handleTimer(dynamic_cast<NmTimerExpired &>(*msg));
++        break;
++    default:
++        m_logger->unhandledNts(*msg);
++        break;
++    }
++}
++
++void ImsClientTask::handleMessage(NtsMessage &msg)
++{
++    auto &w = dynamic_cast<NmUeAppToIms &>(msg);
++    switch (w.present)
++    {
++    case NmUeAppToIms::SESSION_BOUND:
++        handleSessionBound(w);
++        break;
++    case NmUeAppToIms::SESSION_RELEASED:
++        handleSessionReleased(w);
++        break;
++    case NmUeAppToIms::DOWNLINK_DATA:
++        handleDownlinkData(w);
++        break;
++    case NmUeAppToIms::CLI_COMMAND:
++        handleCliCommand(w);
++        break;
++    }
++}
++
++void ImsClientTask::handleSessionBound(const NmUeAppToIms &msg)
++{
++    m_psi = msg.psi;
++    m_localIp = msg.localIp;
++    // P4: EPCO-provided P-CSCF wins; the configured one is the fallback.
++    m_pcscfIp = msg.pcscf.empty() ? m_base->config->ims.pcscf : msg.pcscf;
++    m_bound = true;
++
++    m_logger->info("IMS session bound [psi=%d, local=%s, pcscf=%s%s]", m_psi, m_localIp.c_str(), m_pcscfIp.c_str(),
++                   msg.pcscf.empty() ? " (config)" : " (EPCO)");
++
++    m_retryIndex = 0;
++    m_lastError.clear();
++    startRegistration();
++}
++
++void ImsClientTask::handleSessionReleased(const NmUeAppToIms &msg)
++{
++    if (!m_bound || msg.psi != m_psi)
++        return;
++
++    m_logger->info("IMS session released [psi=%d], stopping registration", m_psi);
++    m_bound = false;
++    m_psi = -1;
++    m_localIp.clear();
++    m_regState = ERegState::IDLE;
++    m_lastError.clear();
++    m_serviceRoute.clear();
++}
++
++void ImsClientTask::handleDownlinkData(const NmUeAppToIms &msg)
++{
++    std::string payload = ims::ExtractUdpPayload(msg.data);
++    if (payload.empty())
++        return;
++
++    // Media (P3): RTP packets are counted (and dropped, silence has no consumer).
++    if (payload.size() >= 12 && (static_cast<uint8_t>(payload[0]) & 0xC0) == 0x80 &&
++        (static_cast<uint8_t>(payload[1]) & 0x7F) == 0 && m_media.IsRunning())
++    {
++        m_mediaRxCount++;
++        return;
++    }
++
++    // A downlink message is either a response ("SIP/2.0 ...") or a request ("<METHOD> ...").
++    if (payload.rfind("SIP/2.0 ", 0) == 0)
++    {
++        handleSipResponse(payload);
++    }
++    else
++    {
++        handleCallRequest(ims::ParseSipRequest(payload));
++    }
++}
++
++void ImsClientTask::handleCliCommand(const NmUeAppToIms &msg)
++{
++    if (!msg.cmd)
++        return;
++
++    switch (msg.cmd->present)
++    {
++    case app::UeCliCommand::IMS_REGISTER:
++        if (!m_bound)
++        {
++            sendResponse(msg.address, "IMS is not bound to any session", true);
++            break;
++        }
++        m_logger->info("IMS registration triggered by CLI");
++        m_retryIndex = 0;
++        m_lastError.clear();
++        startRegistration();
++        sendResponse(msg.address, "IMS registration started", false);
++        break;
++    case app::UeCliCommand::IMS_STATUS:
++        m_logger->debug("CLI ims-status requested");
++        sendResponse(msg.address, statusText(), false);
++        break;
++    case app::UeCliCommand::IMS_CALL:
++        if (!m_bound)
++        {
++            sendResponse(msg.address, "IMS is not bound to any session", true);
++            break;
++        }
++        if (m_regState != ERegState::REGISTERED)
++        {
++            sendResponse(msg.address, "IMS is not registered", true);
++            break;
++        }
++        if (m_callState != ECallState::IDLE)
++        {
++            sendResponse(msg.address, "A call is already in progress", true);
++            break;
++        }
++        if (msg.cmd->callUri.empty())
++        {
++            sendResponse(msg.address, "No call URI provided", true);
++            break;
++        }
++        m_logger->info("IMS call initiated to %s", msg.cmd->callUri.c_str());
++        startCall(msg.cmd->callUri);
++        sendResponse(msg.address, "IMS call initiated", false);
++        break;
++    case app::UeCliCommand::IMS_ANSWER:
++        if (m_callState == ECallState::RINGING)
++        {
++            m_logger->info("IMS call answered by CLI");
++            m_callState = ECallState::ANSWERING;
++            setTimer(TIMER_CALL_TIMEOUT, CALL_TIMEOUT_MS);
++            std::string sdp = ims::BuildMediaSdp(m_localIp, m_base->config->ims.mediaPort);
++            sendCallReply(m_pendingInvite, 200, "OK", sdp);
++            sendResponse(msg.address, "IMS call answered", false);
++
++            std::string peerIp;
++            int peerPort = 0;
++            if (ims::ParseSdpMedia(m_pendingInvite.body, peerIp, peerPort))
++                startMedia(peerIp, peerPort);
++        }
++        else
++        {
++            sendResponse(msg.address, "No incoming call to answer", true);
++        }
++        break;
++    case app::UeCliCommand::IMS_HANGUP:
++        if (m_callState == ECallState::IDLE)
++        {
++            sendResponse(msg.address, "No active call", true);
++            break;
++        }
++        hangupCall();
++        sendResponse(msg.address, "IMS call hangup", false);
++        break;
++    default:
++        break;
++    }
++}
++
++void ImsClientTask::handleTimer(const NmTimerExpired &msg)
++{
++    switch (msg.timerId)
++    {
++    case TIMER_REG_TIMEOUT:
++        if (m_regState == ERegState::REGISTERING)
++            onRegFail("registration attempt timeout");
++        break;
++    case TIMER_REG_RETRY:
++        if (m_regState == ERegState::FAILED)
++        {
++            m_regState = ERegState::REGISTERING;
++            m_usingAuth = false;
++            sendRegister(false);
++            armAttemptTimeout();
++        }
++        break;
++    case TIMER_RE_REGISTER:
++        if (m_regState == ERegState::REGISTERED)
++        {
++            // Stale duplicate timers (piled up during a retransmission storm) fire well
++            // before the scheduled re-registration interval; ignore triggers closer than
++            // 20% of the interval. A fixed guard would permanently block re-registration
++            // when the server issues a short expires (interval < guard).
++            using namespace std::chrono;
++            auto now = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
++            int64_t guardMs = static_cast<int64_t>(m_regExpires) * 900 / 5;
++            if (now - m_regSuccessTime < guardMs)
++            {
++                m_logger->debug("Ignoring stale re-registration timer");
++                break;
++            }
++            m_logger->info("Re-registration timer expired, refreshing registration");
++            m_regState = ERegState::REGISTERING;
++            m_usingAuth = false;
++            sendRegister(false);
++            armAttemptTimeout();
++        }
++        break;
++    case TIMER_TX_RETRANSMIT:
++        if (m_txRetransmitCount > 0 && !m_pendingTxRequest.empty())
++        {
++            m_txRetransmitCount--;
++            m_logger->debug("Retransmitting SIP request [left=%d]", m_txRetransmitCount);
++            auto packet = ims::BuildUdpPacket(m_pendingTxRequest, m_localIp, m_pcscfIp,
++                                              m_base->config->ims.sipPort, m_base->config->ims.pcscfPort);
++            auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
++            m->psi = m_psi;
++            m->data = std::move(packet);
++            m_base->nasTask->push(std::move(m));
++            if (m_txRetransmitCount > 0)
++                setTimer(TIMER_TX_RETRANSMIT, TX_RETRANSMIT_MS);
++        }
++        break;
++    case TIMER_CALL_TIMEOUT:
++        if (m_callState == ECallState::CALLING || m_callState == ECallState::HANGING_UP ||
++            m_callState == ECallState::ANSWERING)
++        {
++            m_logger->warn("Call timed out [state=%s]", callStateName().c_str());
++            callFail("call timeout");
++        }
++        break;
++    case TIMER_MEDIA_SEND:
++        if (m_callState == ECallState::CONFIRMED)
++        {
++            m_media.Send();
++            setTimer(TIMER_MEDIA_SEND, MEDIA_SEND_MS);
++        }
++        break;
++    default:
++        break;
++    }
++}
++
++void ImsClientTask::startRegistration()
++{
++    if (!m_bound)
++        return;
++
++    m_regState = ERegState::REGISTERING;
++    m_usingAuth = false;
++    m_logger->info("Sending initial REGISTER");
++    sendRegister(false);
++    armAttemptTimeout();
++}
++
++void ImsClientTask::sendRegister(bool withAuth)
++{
++    if (!m_bound)
++        return;
++
++    m_cseq++;
++    if (m_regCallId.empty())
++        m_regCallId = generateId() + "@" + m_localIp;
++    if (m_regTag.empty())
++        m_regTag = generateId();
++    // A fresh Via branch is required for every transaction; the Call-ID and From tag stay constant across
++    // the challenge-response within one registration flow.
++    m_regBranch = "z9hG4bK" + generateId();
++
++    std::string authHeader;
++    if (withAuth)
++        authHeader = m_regAuth.authorization("REGISTER", ims::RegistrarUri(m_base->config->ims));
++
++    std::string body = ims::BuildRegister(m_base->config->ims, m_localIp, m_cseq, m_regCallId, m_regBranch, m_regTag,
++                                          authHeader);
++    auto packet = ims::BuildUdpPacket(body, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
++                                      m_base->config->ims.pcscfPort);
++
++    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
++    m->psi = m_psi;
++    m->data = std::move(packet);
++    m_base->nasTask->push(std::move(m));
++    m_lastRegCseq = m_cseq;
++
++    if (withAuth)
++        m_logger->debug("REGISTER sent (digest) [cseq=%d]", m_cseq);
++    else
++        m_logger->debug("REGISTER sent [cseq=%d]", m_cseq);
++}
++
++void ImsClientTask::startCall(const std::string &uri)
++{
++    m_callCallId = generateId() + "@" + m_localIp;
++    m_dialogMyTag = generateId();
++    m_remoteUri = uri;
++    m_remoteContact.clear();
++    m_dialogPeerTag.clear();
++    m_callUsingAuth = false;
++    m_callCSeq = 1;
++    m_callState = ECallState::CALLING;
++    m_callRouteSet = "<sip:" + m_pcscfIp + ":" + std::to_string(m_base->config->ims.pcscfPort) + ";lr>," + m_serviceRoute;
++
++    m_logger->info("Sending INVITE to %s", uri.c_str());
++    sendInvite(false);
++    setTimer(TIMER_CALL_TIMEOUT, CALL_TIMEOUT_MS);
++}
++
++void ImsClientTask::sendInvite(bool withAuth)
++{
++    std::string authHeader;
++    if (withAuth)
++        authHeader = m_callAuth.authorization("INVITE", m_remoteUri);
++
++    std::string body = ims::BuildInvite(m_base->config->ims, m_localIp, m_remoteUri, m_serviceRoute, m_callCallId,
++                                        "z9hG4bK" + generateId(), m_dialogMyTag, authHeader);
++
++    auto packet = ims::BuildUdpPacket(body, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
++                                      m_base->config->ims.pcscfPort);
++    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
++    m->psi = m_psi;
++    m->data = std::move(packet);
++    m_base->nasTask->push(std::move(m));
++
++    armTxRetransmit(body);
++    m_logger->debug("INVITE sent [%s]", withAuth ? "digest" : "plain");
++}
++
++void ImsClientTask::sendAck()
++{
++    std::string body = ims::BuildInDialogRequest("ACK", m_localIp, m_base->config->ims, m_remoteUri, m_remoteContact,
++                                                 m_callRouteSet, m_callCallId, "z9hG4bK" + generateId(),
++                                                 m_base->config->ims.publicIdentity, m_dialogMyTag, m_remoteUri,
++                                                 m_dialogPeerTag, m_callCSeq);
++    auto packet = ims::BuildUdpPacket(body, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
++                                      m_base->config->ims.pcscfPort);
++    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
++    m->psi = m_psi;
++    m->data = std::move(packet);
++    m_base->nasTask->push(std::move(m));
++    m_logger->debug("ACK sent");
++}
++
++void ImsClientTask::sendErrorAck()
++{
++    // ACK for a non-2xx final response to an INVITE (RFC 3261 17.1.1.3): sent to the
++    // P-CSCF, no Route/Contact, matching the failed transaction.
++    std::string body = ims::BuildErrorAck(m_base->config->ims, m_localIp, m_remoteUri, m_callCallId,
++                                          m_dialogMyTag, m_callCSeq);
++    auto packet = ims::BuildUdpPacket(body, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
++                                      m_base->config->ims.pcscfPort);
++    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
++    m->psi = m_psi;
++    m->data = std::move(packet);
++    m_base->nasTask->push(std::move(m));
++    m_logger->debug("Error ACK sent [%d]", m_callCSeq);
++}
++
++void ImsClientTask::sendBye()
++{
++    m_callCSeq++;
++    std::string body = ims::BuildInDialogRequest("BYE", m_localIp, m_base->config->ims, m_remoteUri, m_remoteContact,
++                                                 m_callRouteSet, m_callCallId, "z9hG4bK" + generateId(),
++                                                 m_base->config->ims.publicIdentity, m_dialogMyTag, m_remoteUri,
++                                                 m_dialogPeerTag, m_callCSeq);
++    auto packet = ims::BuildUdpPacket(body, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
++                                      m_base->config->ims.pcscfPort);
++    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
++    m->psi = m_psi;
++    m->data = std::move(packet);
++    m_base->nasTask->push(std::move(m));
++    armTxRetransmit(body);
++    m_logger->debug("BYE sent");
++}
++
++void ImsClientTask::hangupCall()
++{
++    if (m_callState == ECallState::CALLING)
++    {
++        m_logger->info("Cancelling ongoing call attempt");
++        callFail("cancelled by user");
++        return;
++    }
++    if (m_callState == ECallState::CONFIRMED)
++    {
++        m_logger->info("Sending BYE to hang up the call");
++        m_callState = ECallState::HANGING_UP;
++        sendBye();
++        setTimer(TIMER_CALL_TIMEOUT, CALL_TIMEOUT_MS);
++        return;
++    }
++    // RINGING/ANSWERING: no established dialog; just clear.
++    callFail("hangup");
++}
++
++void ImsClientTask::handleCallResponse(const ims::SipResponseInfo &info)
++{
++    // Provisional responses are informational.
++    if (info.statusCode >= 100 && info.statusCode < 200)
++        return;
++
++    if (m_callState == ECallState::CALLING)
++    {
++        if (info.statusCode == 401 && !m_callUsingAuth)
++        {
++            if (!info.challenge.has_value() || !m_callAuth.beginChallenge(*info.challenge, m_base->config->ims.realm))
++            {
++                callFail("401 without a usable challenge");
++                return;
++            }
++            m_callUsingAuth = true;
++            m_logger->info("Received 401 challenge, sending authenticated INVITE");
++            cancelTx();
++            sendInvite(true);
++            return;
++        }
++        if (info.statusCode == 200)
++        {
++            m_dialogPeerTag = info.toTag;
++            m_remoteContact = info.contact;
++            // In-dialog requests from the caller follow the Record-Route set (forward order,
++            // starting with its own P-CSCF); Service-Route lacks the dialog id used by the S-CSCF.
++            m_callRouteSet = JoinRouteSet(info.recordRoutes, false);
++            cancelTx();
++            setTimer(TIMER_CALL_TIMEOUT, 0);
++            m_logger->info("Call established (200 OK), sending ACK");
++            sendAck();
++            m_callState = ECallState::CONFIRMED;
++
++            // Media (P3): the 200 OK SDP answer carries the (rtpengine) media address.
++            std::string peerIp;
++            int peerPort = 0;
++            if (ims::ParseSdpMedia(info.body, peerIp, peerPort))
++                startMedia(peerIp, peerPort);
++            return;
++        }
++        if (info.statusCode >= 300)
++        {
++            sendErrorAck();
++            callFail(std::to_string(info.statusCode) + " " + info.reasonPhrase);
++            return;
++        }
++    }
++    else if (m_callState == ECallState::HANGING_UP)
++    {
++        if (info.statusCode == 200)
++        {
++            m_logger->info("BYE acknowledged, call ended");
++            callFail("");
++        }
++        else if (info.statusCode >= 300)
++        {
++            m_logger->warn("BYE failed [%d %s]", info.statusCode, info.reasonPhrase.c_str());
++            callFail("");
++        }
++    }
++}
++
++void ImsClientTask::handleCallRequest(const ims::SipRequestInfo &req)
++{
++    if (req.method.empty())
++        return;
++
++    m_logger->debug("SIP request received [%s]", req.method.c_str());
++    if (req.method == "INVITE")
++    {
++        if (m_callState != ECallState::IDLE)
++        {
++            // INVITE retransmission (same Call-ID + CSeq) of the in-progress call:
++            // re-send the last reply instead of treating it as a new call.
++            if (req.callId == m_callCallId && req.cseq == m_callCSeq && m_lastReplyCode != 0)
++            {
++                m_logger->debug("INVITE retransmission, re-sending [%d %s]", m_lastReplyCode,
++                                m_lastReplyReason.c_str());
++                sendCallReply(m_pendingInvite, m_lastReplyCode, m_lastReplyReason, m_lastReplyBody);
++            }
++            else
++            {
++                m_logger->warn("Busy, rejecting incoming INVITE");
++                sendCallReply(req, 486, "Busy Here", "");
++            }
++            return;
++        }
++
++        m_pendingInvite = req;
++        m_callCallId = req.callId;
++        m_callCSeq = req.cseq;
++        m_lastReplyCode = 0;
++        m_dialogMyTag = generateId();
++        m_dialogPeerTag = req.fromTag;
++        m_remoteUri = StripUriTag(req.from);
++        m_remoteContact = req.contact;
++        // In-dialog requests from the callee must follow the Record-Route set (reversed,
++        // starting with its own P-CSCF); Service-Route lacks the dialog id used by the S-CSCF.
++        m_callRouteSet = JoinRouteSet(req.recordRoutes, true);
++        if (m_callRouteSet.empty())
++            m_callRouteSet = "<sip:" + m_pcscfIp + ":" + std::to_string(m_base->config->ims.pcscfPort) + ";lr>," +
++                             m_serviceRoute;
++
++        m_logger->info("Incoming INVITE from %s, autoAnswer=%d", req.from.c_str(),
++                       m_base->config->ims.autoAnswer ? 1 : 0);
++        sendCallReply(req, 180, "Ringing", "");
++        m_lastReplyCode = 180;
++        m_lastReplyReason = "Ringing";
++        m_lastReplyBody.clear();
++
++        if (m_base->config->ims.autoAnswer)
++        {
++            m_callState = ECallState::ANSWERING;
++            setTimer(TIMER_CALL_TIMEOUT, CALL_TIMEOUT_MS);
++            std::string sdp = ims::BuildMediaSdp(m_localIp, m_base->config->ims.mediaPort);
++            sendCallReply(req, 200, "OK", sdp);
++            m_lastReplyCode = 200;
++            m_lastReplyReason = "OK";
++            m_lastReplyBody = sdp;
++
++            // Media (P3): the INVITE SDP offer carries the (rtpengine) media address.
++            std::string peerIp;
++            int peerPort = 0;
++            if (ims::ParseSdpMedia(req.body, peerIp, peerPort))
++                startMedia(peerIp, peerPort);
++        }
++        else
++        {
++            m_callState = ECallState::RINGING;
++        }
++    }
++    else if (req.method == "ACK")
++    {
++        if (m_callState == ECallState::ANSWERING)
++        {
++            m_logger->info("ACK received, call confirmed");
++            m_callState = ECallState::CONFIRMED;
++        }
++    }
++    else if (req.method == "BYE")
++    {
++        m_logger->info("BYE received, ending call");
++        stopMedia();
++        sendCallReply(req, 200, "OK", "");
++        m_callState = ECallState::IDLE;
++        m_callCallId.clear();
++        m_remoteContact.clear();
++        m_dialogPeerTag.clear();
++    }
++}
++
++void ImsClientTask::startMedia(const std::string &peerIp, int peerPort)
++{
++    m_media.Start(m_psi, m_localIp, m_base->config->ims.mediaPort, peerIp, peerPort, m_mediaSsrc);
++    m_mediaSsrc++;
++    setTimer(TIMER_MEDIA_SEND, MEDIA_SEND_MS);
++    m_logger->info("Media started [peer=%s:%d]", peerIp.c_str(), peerPort);
++}
++
++void ImsClientTask::stopMedia()
++{
++    m_media.Stop();
++    m_logger->debug("Media stopped [tx=%llu]", static_cast<unsigned long long>(m_media.TxCount()));
++}
++
++void ImsClientTask::sendCallReply(const ims::SipRequestInfo &req, int code, const std::string &reason,
++                                  const std::string &body)
++{
++    std::string reply = ims::BuildSipReply(m_base->config->ims, m_localIp, code, reason, req, m_dialogMyTag, body);
++    auto packet = ims::BuildUdpPacket(reply, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
++                                      m_base->config->ims.pcscfPort);
++    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
++    m->psi = m_psi;
++    m->data = std::move(packet);
++    m_base->nasTask->push(std::move(m));
++    m_logger->debug("SIP reply sent [%d %s]", code, reason.c_str());
++}
++
++void ImsClientTask::callFail(const std::string &reason)
++{
++    if (!reason.empty())
++        m_logger->warn("Call failed [%s]", reason.c_str());
++    stopMedia();
++    cancelTx();
++    m_callState = ECallState::IDLE;
++    m_callCallId.clear();
++    m_remoteContact.clear();
++    m_dialogPeerTag.clear();
++    m_lastReplyCode = 0;
++    m_lastReplyReason.clear();
++    m_lastReplyBody.clear();
++    m_pendingInvite = ims::SipRequestInfo{};
++}
++
++void ImsClientTask::armTxRetransmit(const std::string &requestBody)
++{
++    m_pendingTxRequest = requestBody;
++    m_txRetransmitCount = TX_MAX_RETRANSMIT;
++    setTimer(TIMER_TX_RETRANSMIT, TX_RETRANSMIT_MS);
++}
++
++void ImsClientTask::cancelTx()
++{
++    m_pendingTxRequest.clear();
++    m_txRetransmitCount = 0;
++}
++
++void ImsClientTask::handleSipResponse(const std::string &text)
++{
++    auto info = ims::ParseSipResponse(text);
++    if (info.statusCode <= 0)
++        return;
++
++    m_logger->debug("SIP response received [%d %s]", info.statusCode, info.reasonPhrase.c_str());
++
++    // Dispatch to the call state machine when the response belongs to an active call dialog.
++    if (m_callState != ECallState::IDLE && !info.callId.empty() && info.callId == m_callCallId)
++    {
++        handleCallResponse(info);
++        return;
++    }
++
++    if (m_regState != ERegState::REGISTERING && m_regState != ERegState::REGISTERED)
++        return;
++
++    // Provisional responses (1xx) are informational; ignore them.
++    if (info.statusCode >= 100 && info.statusCode < 200)
++        return;
++
++    if (info.statusCode == 401)
++    {
++        if (m_regState != ERegState::REGISTERING)
++            return;
++        if (m_usingAuth)
++        {
++            onRegFail("401 received on an already authenticated REGISTER");
++            return;
++        }
++
++        if (!info.challenge.has_value() || !m_regAuth.beginChallenge(*info.challenge, m_base->config->ims.realm))
++        {
++            onRegFail("401 without a usable challenge");
++            return;
++        }
++
++        m_usingAuth = true;
++
++        m_logger->info("Received 401 challenge, sending authenticated REGISTER");
++        sendRegister(true);
++        armAttemptTimeout();
++        return;
++    }
++
++    if (info.statusCode == 200)
++    {
++        // A retransmitted 200 OK (same CSeq as the last sent REGISTER) must not be
++        // treated as a fresh success: it would re-arm the re-registration timer and
++        // pile up stale timers, producing a registration loop.
++        if (info.cseq == m_lastRegCseq && m_regState == ERegState::REGISTERED)
++            return;
++
++        int expires = info.expires.value_or(m_base->config->ims.expires);
++        if (!info.serviceRoutes.empty())
++            m_serviceRoute = info.serviceRoutes.front();
++        onRegSuccess(expires);
++        return;
++    }
++
++    // Any other response is a registration failure.
++    onRegFail(std::to_string(info.statusCode) + " " + info.reasonPhrase);
++}
++
++void ImsClientTask::onRegFail(const std::string &reason)
++{
++    if (m_regState != ERegState::REGISTERING)
++        return;
++
++    m_lastError = reason;
++    m_regState = ERegState::FAILED;
++    m_logger->warn("IMS registration failed [%s]", reason.c_str());
++    scheduleRetry();
++}
++
++void ImsClientTask::onRegSuccess(int expires)
++{
++    m_regState = ERegState::REGISTERED;
++    m_retryIndex = 0;
++    m_lastError.clear();
++    m_regExpires = expires;
++    using namespace std::chrono;
++    m_regSuccessTime =
++        duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
++
++    m_logger->info("IMS registration succeeded [expires=%d]", m_regExpires);
++    scheduleReRegister();
++}
++
++void ImsClientTask::scheduleRetry()
++{
++    static constexpr const int delays[] = {5000, 15000, 45000, 60000};
++    int idx = m_retryIndex;
++    if (idx >= 4)
++        idx = 3;
++    m_retryIndex++;
++    m_logger->warn("Retrying registration in %d ms", delays[idx]);
++    setTimer(TIMER_REG_RETRY, delays[idx]);
++}
++
++void ImsClientTask::armAttemptTimeout()
++{
++    setTimer(TIMER_REG_TIMEOUT, REG_ATTEMPT_TIMEOUT_MS);
++}
++
++void ImsClientTask::scheduleReRegister()
++{
++    int64_t delayMs = static_cast<int64_t>(m_regExpires) * 900; // 90% of the server-issued expiry
++    m_logger->info("Scheduling re-registration in %lld ms", static_cast<long long>(delayMs));
++    setTimer(TIMER_RE_REGISTER, delayMs);
++}
++
++void ImsClientTask::sendResponse(const InetAddress &address, const std::string &output, bool isError)
++{
++    m_logger->debug("Sending CLI response [isError=%d, len=%zu]", isError ? 1 : 0, output.size());
++    m_base->cliCallbackTask->push(std::make_unique<app::NwCliSendResponse>(address, output, isError));
++}
++
++std::string ImsClientTask::generateId()
++{
++    uint64_t now = static_cast<uint64_t>(utils::CurrentTimeMillis());
++    uint64_t counter = m_rngCounter++;
++    return std::to_string(now) + "-" + std::to_string(counter);
++}
++
++std::string ImsClientTask::regStateName() const
++{
++    switch (m_regState)
++    {
++    case ERegState::IDLE:
++        return "IDLE";
++    case ERegState::REGISTERING:
++        return "REGISTERING";
++    case ERegState::REGISTERED:
++        return "REGISTERED";
++    case ERegState::FAILED:
++        return "FAILED";
++    }
++    return "UNKNOWN";
++}
++
++std::string ImsClientTask::callStateName() const
++{
++    switch (m_callState)
++    {
++    case ECallState::IDLE:
++        return "IDLE";
++    case ECallState::CALLING:
++        return "CALLING";
++    case ECallState::RINGING:
++        return "RINGING";
++    case ECallState::ANSWERING:
++        return "ANSWERING";
++    case ECallState::CONFIRMED:
++        return "CONFIRMED";
++    case ECallState::HANGING_UP:
++        return "HANGING_UP";
++    }
++    return "UNKNOWN";
++}
++
++std::string ImsClientTask::statusText()
++{
++    Json json = Json::Obj({
++        {"state", regStateName()},
++        {"registered", m_regState == ERegState::REGISTERED},
++        {"expires", m_regState == ERegState::REGISTERED ? m_regExpires : -1},
++        {"retryCount", static_cast<int32_t>(m_retryIndex)},
++        {"bound", m_bound},
++        {"psi", m_bound ? m_psi : -1},
++        {"localIp", m_bound ? m_localIp : ""},
++        {"error", m_lastError},
++        {"callState", callStateName()},
++        {"callId", m_callState != ECallState::IDLE ? m_callCallId : ""},
++        {"remote", m_callState != ECallState::IDLE ? m_remoteUri : ""},
++        {"mediaTxCount", static_cast<int64_t>(m_media.TxCount())},
++        {"mediaRxCount", static_cast<int64_t>(m_mediaRxCount)},
++    });
++    return json.dumpJson();
++}
++
++} // namespace nr::ue
+diff --git a/src/ue/ims/ims.hpp b/src/ue/ims/ims.hpp
+new file mode 100644
+index 0000000..3e24f54
+--- /dev/null
++++ b/src/ue/ims/ims.hpp
+@@ -0,0 +1,160 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#pragma once
++
++#include <string>
++
++#include <ue/nts.hpp>
++#include <ue/types.hpp>
++#include <utils/logger.hpp>
++#include <utils/nts.hpp>
++
++#include "auth.hpp"
++#include "media.hpp"
++#include "sip_stack.hpp"
++
++namespace nr::ue
++{
++
++class ImsClientTask : public NtsTask
++{
++  private:
++    enum class ERegState
++    {
++        IDLE,
++        REGISTERING,
++        REGISTERED,
++        FAILED,
++    };
++
++    enum class ECallState
++    {
++        IDLE,
++        CALLING,   // caller: INVITE sent, awaiting final response
++        RINGING,   // callee: INVITE received (auto-answer pending)
++        ANSWERING, // callee: 200 sent, awaiting ACK
++        CONFIRMED, // dialog established
++        HANGING_UP // BYE sent, awaiting 200
++    };
++
++    static constexpr const int TIMER_REG_TIMEOUT = 1;
++    static constexpr const int TIMER_REG_RETRY = 2;
++    static constexpr const int TIMER_RE_REGISTER = 3;
++    static constexpr const int TIMER_TX_RETRANSMIT = 4;
++    static constexpr const int TIMER_CALL_TIMEOUT = 5;
++    static constexpr const int TIMER_MEDIA_SEND = 6;
++
++    static constexpr const int REG_ATTEMPT_TIMEOUT_MS = 3000;
++    static constexpr const int TX_RETRANSMIT_MS = 500;
++    static constexpr const int TX_MAX_RETRANSMIT = 4;
++    static constexpr const int CALL_TIMEOUT_MS = 15000;
++    static constexpr const int MEDIA_SEND_MS = 20;
++
++  private:
++    TaskBase *m_base;
++    std::unique_ptr<Logger> m_logger;
++
++    // Session binding (apn == "ims")
++    bool m_bound{false};
++    int m_psi{-1};
++    std::string m_localIp;
++    std::string m_pcscfIp;
++
++    // Registration state
++    ERegState m_regState{ERegState::IDLE};
++    int m_cseq{0};
++    std::string m_regCallId;
++    std::string m_regBranch;
++    std::string m_regTag;
++    bool m_usingAuth{false};
++    int m_regExpires{300};
++    std::string m_serviceRoute;
++    uint32_t m_retryIndex{0};
++    std::string m_lastError;
++    int m_lastRegCseq{0};
++    int64_t m_regSuccessTime{0};
++
++    // Call state
++    ECallState m_callState{ECallState::IDLE};
++    std::string m_callCallId;
++    std::string m_callBranch;
++    std::string m_dialogMyTag;
++    std::string m_remoteUri;
++    std::string m_remoteContact;
++    std::string m_dialogPeerTag;
++    std::string m_callRouteSet;
++    int m_callCSeq{0};
++    int m_lastReplyCode{0};
++    std::string m_lastReplyReason;
++    std::string m_lastReplyBody;
++    bool m_callUsingAuth{false};
++    std::string m_pendingTxRequest;
++    int m_txRetransmitCount{0};
++    ims::SipRequestInfo m_pendingInvite;
++
++    // Digest challenges (registration vs call keep independent state; each is one DigestAuth).
++    ims::DigestAuth m_regAuth;
++    ims::DigestAuth m_callAuth;
++
++    // Media (P3): best-effort PCMU silence sender + receive counter.
++    ims::RtpSender m_media;
++    uint64_t m_mediaRxCount{0};
++    uint32_t m_mediaSsrc{0};
++
++    // Pseudo-random generator counter
++    uint64_t m_rngCounter{0};
++
++  public:
++    explicit ImsClientTask(TaskBase *base);
++
++  protected:
++    void onStart() override;
++    void onLoop() override;
++    void onQuit() override;
++
++  private:
++    void handleMessage(NtsMessage &msg);
++    void handleSessionBound(const NmUeAppToIms &msg);
++    void handleSessionReleased(const NmUeAppToIms &msg);
++    void handleDownlinkData(const NmUeAppToIms &msg);
++    void handleCliCommand(const NmUeAppToIms &msg);
++    void handleTimer(const NmTimerExpired &msg);
++
++    void startRegistration();
++    void sendRegister(bool withAuth);
++    void handleSipResponse(const std::string &text);
++    void onRegFail(const std::string &reason);
++    void onRegSuccess(int expires);
++    void scheduleRetry();
++    void scheduleReRegister();
++    void armAttemptTimeout();
++
++    void startCall(const std::string &uri);
++    void sendInvite(bool withAuth);
++    void sendAck();
++    void sendErrorAck();
++    void startMedia(const std::string &peerIp, int peerPort);
++    void stopMedia();
++    void sendBye();
++    void hangupCall();
++    void handleCallResponse(const ims::SipResponseInfo &info);
++    void handleCallRequest(const ims::SipRequestInfo &req);
++    void sendCallReply(const ims::SipRequestInfo &req, int code, const std::string &reason, const std::string &body);
++    void callFail(const std::string &reason);
++    void armTxRetransmit(const std::string &requestBody);
++    void cancelTx();
++
++    void sendResponse(const InetAddress &address, const std::string &output, bool isError);
++    std::string generateId();
++    std::string statusText();
++    std::string regStateName() const;
++    std::string callStateName() const;
++};
++
++} // namespace nr::ue
+diff --git a/src/ue/ims/media.cpp b/src/ue/ims/media.cpp
+new file mode 100644
+index 0000000..74fa667
+--- /dev/null
++++ b/src/ue/ims/media.cpp
+@@ -0,0 +1,69 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#include <ue/ims/media.hpp>
++#include <ue/ims/packet.hpp>
++#include <ue/nas/task.hpp>
++#include <ue/nts.hpp>
++#include <utils/common.hpp>
++
++namespace nr::ue::ims
++{
++
++RtpSender::RtpSender(TaskBase *base) : m_base{base}
++{
++}
++
++void RtpSender::Start(int psi, const std::string &localIp, int localPort, const std::string &peerIp, int peerPort,
++                      uint32_t ssrc)
++{
++    m_psi = psi;
++    m_localIp = localIp;
++    m_localPort = localPort;
++    m_peerIp = peerIp;
++    m_peerPort = peerPort;
++    m_ssrc = static_cast<int>(ssrc);
++    m_seq = 0;
++    m_ts = 0;
++    m_txCount = 0;
++}
++
++void RtpSender::Stop()
++{
++    m_peerPort = 0;
++    m_localPort = 0;
++}
++
++void RtpSender::Send()
++{
++    if (!IsRunning())
++        return;
++
++    OctetString packet = BuildRtpPacket(m_localIp, m_localPort, m_peerIp, m_peerPort,
++                                        static_cast<uint32_t>(m_ssrc), m_seq, m_ts);
++    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
++    m->psi = m_psi;
++    m->data = std::move(packet);
++    m_base->nasTask->push(std::move(m));
++
++    m_seq++;
++    m_ts += 160; // 20 ms at 8 kHz
++    m_txCount++;
++}
++
++bool RtpSender::IsRunning() const
++{
++    return m_localPort > 0 && m_peerPort > 0;
++}
++
++uint64_t RtpSender::TxCount() const
++{
++    return m_txCount;
++}
++
++} // namespace nr::ue::ims
+diff --git a/src/ue/ims/media.hpp b/src/ue/ims/media.hpp
+new file mode 100644
+index 0000000..fc8d54c
+--- /dev/null
++++ b/src/ue/ims/media.hpp
+@@ -0,0 +1,56 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#pragma once
++
++#include <cstdint>
++#include <string>
++#include <utils/nts.hpp>
++#include <utils/octet_string.hpp>
++
++namespace nr::ue
++{
++
++class TaskBase;
++
++namespace ims
++{
++
++// P3 media sender: best-effort PCMU silence stream, decoupled from the call state machine.
++// Sends a 20 ms PCMU silence frame every 20 ms over the IMS PDU session (direct NAS push).
++class RtpSender
++{
++  private:
++    TaskBase *m_base;
++    int m_psi{0};
++    std::string m_localIp;
++    int m_localPort{0};
++    std::string m_peerIp;
++    int m_peerPort{0};
++    int m_ssrc{0};
++    uint16_t m_seq{0};
++    uint32_t m_ts{0};
++    uint64_t m_txCount{0};
++
++  public:
++    explicit RtpSender(TaskBase *base);
++
++    // Binds the local endpoint and starts sending towards the peer media address.
++    void Start(int psi, const std::string &localIp, int localPort, const std::string &peerIp, int peerPort,
++               uint32_t ssrc);
++    void Stop();
++
++    // Sends one 20 ms silence frame over the IMS PDU session (driven by the call task timer).
++    void Send();
++
++    bool IsRunning() const;
++    uint64_t TxCount() const;
++};
++
++} // namespace ims
++} // namespace nr::ue
+diff --git a/src/ue/ims/packet.cpp b/src/ue/ims/packet.cpp
+new file mode 100644
+index 0000000..194d858
+--- /dev/null
++++ b/src/ue/ims/packet.cpp
+@@ -0,0 +1,199 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#include "packet.hpp"
++
++#include <cstring>
++
++namespace nr::ue
++{
++namespace ims
++{
++
++namespace
++{
++
++bool ParseIpBytes(const std::string &ip, uint8_t out[4])
++{
++    unsigned int parts[4];
++    if (std::sscanf(ip.c_str(), "%u.%u.%u.%u", &parts[0], &parts[1], &parts[2], &parts[3]) != 4)
++        return false;
++    for (auto &p : parts)
++    {
++        if (p > 255)
++            return false;
++    }
++    out[0] = static_cast<uint8_t>(parts[0]);
++    out[1] = static_cast<uint8_t>(parts[1]);
++    out[2] = static_cast<uint8_t>(parts[2]);
++    out[3] = static_cast<uint8_t>(parts[3]);
++    return true;
++}
++
++// RFC 1071 internet checksum (ones' complement). Kept internal; verified via BuildUdpPacket.
++uint16_t InetChecksum(const uint8_t *data, size_t len)
++{
++    uint32_t sum = 0;
++    size_t i = 0;
++    for (; i + 1 < len; i += 2)
++        sum += static_cast<uint32_t>(data[i]) << 8 | data[i + 1];
++    if (i < len)
++        sum += static_cast<uint32_t>(data[i]) << 8;
++
++    while (sum >> 16)
++        sum = (sum & 0xFFFF) + (sum >> 16);
++
++    return static_cast<uint16_t>(~sum);
++}
++
++} // namespace
++
++OctetString BuildUdpPacket(const std::string &payload, const std::string &srcIp, const std::string &dstIp, int sport,
++                           int dport)
++{
++    uint8_t src[4];
++    uint8_t dst[4];
++    if (!ParseIpBytes(srcIp, src) || !ParseIpBytes(dstIp, dst))
++        return {};
++
++    uint16_t totalLen = static_cast<uint16_t>(20 + 8 + payload.size());
++    uint16_t udpLen = static_cast<uint16_t>(8 + payload.size());
++
++    OctetString packet;
++    packet.appendOctet(0x45); // version 4, IHL 5
++    packet.appendOctet(0x00); // TOS
++    packet.appendOctet(static_cast<uint8_t>(totalLen >> 8));
++    packet.appendOctet(static_cast<uint8_t>(totalLen & 0xFF));
++    packet.appendOctet(0x00); // identification high
++    packet.appendOctet(0x00); // identification low
++    packet.appendOctet(0x00); // flags/frag
++    packet.appendOctet(0x00); // flags/frag
++    packet.appendOctet(64);   // TTL
++    packet.appendOctet(17);   // UDP
++    packet.appendOctet(0x00); // checksum high (computed below)
++    packet.appendOctet(0x00); // checksum low
++    packet.appendOctet(src[0]);
++    packet.appendOctet(src[1]);
++    packet.appendOctet(src[2]);
++    packet.appendOctet(src[3]);
++    packet.appendOctet(dst[0]);
++    packet.appendOctet(dst[1]);
++    packet.appendOctet(dst[2]);
++    packet.appendOctet(dst[3]);
++
++    // UDP header
++    packet.appendOctet(static_cast<uint8_t>(sport >> 8));
++    packet.appendOctet(static_cast<uint8_t>(sport & 0xFF));
++    packet.appendOctet(static_cast<uint8_t>(dport >> 8));
++    packet.appendOctet(static_cast<uint8_t>(dport & 0xFF));
++    packet.appendOctet(static_cast<uint8_t>(udpLen >> 8));
++    packet.appendOctet(static_cast<uint8_t>(udpLen & 0xFF));
++    packet.appendOctet(0x00); // checksum high (computed below)
++    packet.appendOctet(0x00); // checksum low
++
++    for (char c : payload)
++        packet.appendOctet(static_cast<uint8_t>(c));
++
++    // IPv4 header checksum over the 20-byte header.
++    const uint8_t *ipHdr = packet.data();
++    uint16_t ipChecksum = InetChecksum(ipHdr, 20);
++    packet.data()[10] = static_cast<uint8_t>(ipChecksum >> 8);
++    packet.data()[11] = static_cast<uint8_t>(ipChecksum & 0xFF);
++
++    // UDP checksum with the IPv4 pseudo-header.
++    uint8_t pseudo[12];
++    std::memcpy(pseudo, src, 4);
++    std::memcpy(pseudo + 4, dst, 4);
++    pseudo[8] = 0;
++    pseudo[9] = 17;
++    pseudo[10] = static_cast<uint8_t>(udpLen >> 8);
++    pseudo[11] = static_cast<uint8_t>(udpLen & 0xFF);
++
++    uint32_t sum = 0;
++    auto addSum = [&sum](const uint8_t *p, size_t len)
++    {
++        for (size_t i = 0; i + 1 < len; i += 2)
++            sum += static_cast<uint32_t>(p[i]) << 8 | p[i + 1];
++    };
++    addSum(pseudo, 12);
++    for (int i = 0; i < 2; i++)
++    {
++        uint16_t u16 = static_cast<uint16_t>((packet.data()[20 + i * 2] << 8) | packet.data()[21 + i * 2]);
++        sum += u16;
++    }
++    uint16_t u16 = static_cast<uint16_t>((packet.data()[24] << 8) | packet.data()[25]);
++    sum += u16;
++    u16 = static_cast<uint16_t>((packet.data()[26] << 8) | packet.data()[27]);
++    sum += u16;
++    addSum(packet.data() + 28, payload.size());
++    // RFC 768: an odd-length payload's final byte is padded with a zero in the checksum.
++    if (payload.size() % 2 == 1)
++        sum += static_cast<uint32_t>(packet.data()[28 + payload.size() - 1]) << 8;
++
++    while (sum >> 16)
++        sum = (sum & 0xFFFF) + (sum >> 16);
++    uint16_t udpChecksum = static_cast<uint16_t>(~sum);
++    if (udpChecksum == 0)
++        udpChecksum = 0xFFFF;
++    packet.data()[26] = static_cast<uint8_t>(udpChecksum >> 8);
++    packet.data()[27] = static_cast<uint8_t>(udpChecksum & 0xFF);
++
++    return packet;
++}
++
++bool IsUdpPacket(const OctetString &packet, int dstPort)
++{
++    if (packet.length() < 28)
++        return false;
++    const uint8_t *d = packet.data();
++    if ((d[0] >> 4) != 4) // IPv4 only
++        return false;
++    if (d[9] != 17) // UDP
++        return false;
++    int dport = (static_cast<int>(d[22]) << 8) | d[23];
++    return dport == dstPort;
++}
++
++std::string ExtractUdpPayload(const OctetString &packet)
++{
++    if (packet.length() < 28)
++        return {};
++    return std::string(reinterpret_cast<const char *>(packet.data() + 28), packet.length() - 28);
++}
++
++OctetString BuildRtpPacket(const std::string &localIp, int localPort, const std::string &peerIp, int peerPort,
++                           uint32_t ssrc, uint16_t seq, uint32_t ts)
++{
++    // RTP header (12 bytes): V=2, P=0, X=0, CC=0, M=0, PT=0 (PCMU)
++    uint8_t rtp[12];
++    rtp[0] = 0x80; // V=2, no padding/extension/CSRC
++    rtp[1] = 0x00; // PT=0
++    rtp[2] = (uint8_t)((seq >> 8) & 0xFF);
++    rtp[3] = (uint8_t)(seq & 0xFF);
++    rtp[4] = (uint8_t)((ts >> 24) & 0xFF);
++    rtp[5] = (uint8_t)((ts >> 16) & 0xFF);
++    rtp[6] = (uint8_t)((ts >> 8) & 0xFF);
++    rtp[7] = (uint8_t)(ts & 0xFF);
++    rtp[8] = (uint8_t)((ssrc >> 24) & 0xFF);
++    rtp[9] = (uint8_t)((ssrc >> 16) & 0xFF);
++    rtp[10] = (uint8_t)((ssrc >> 8) & 0xFF);
++    rtp[11] = (uint8_t)(ssrc & 0xFF);
++
++    // 160 bytes of PCMU silence (μ-law zero value)
++    std::string payload;
++    payload.reserve(160);
++    for (int i = 0; i < 160; i++)
++        payload.push_back(static_cast<char>(0xFF)); // μ-law silence code (0xFF = -0)
++
++    std::string body(reinterpret_cast<const char *>(rtp), sizeof(rtp));
++    body += payload;
++    return BuildUdpPacket(body, localIp, peerIp, localPort, peerPort);
++}
++
++} // namespace ims
++} // namespace nr::ue
+diff --git a/src/ue/ims/packet.hpp b/src/ue/ims/packet.hpp
+new file mode 100644
+index 0000000..cb16e33
+--- /dev/null
++++ b/src/ue/ims/packet.hpp
+@@ -0,0 +1,36 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#pragma once
++
++#include <cstdint>
++#include <string>
++
++#include <utils/octet_string.hpp>
++
++namespace nr::ue
++{
++namespace ims
++{
++
++// Wraps a payload into a full IPv4+UDP packet (the data plane carries raw IP packets).
++OctetString BuildUdpPacket(const std::string &payload, const std::string &srcIp, const std::string &dstIp, int sport,
++                           int dport);
++
++// True iff the packet is an IPv4/UDP packet whose destination port equals dstPort.
++bool IsUdpPacket(const OctetString &packet, int dstPort);
++
++// Extracts the UDP payload from an IPv4/UDP packet.
++std::string ExtractUdpPayload(const OctetString &packet);
++
++// Builds one RTP packet (IPv4/UDP header + 12-byte RTP header + 160-byte PCMU silence frame).
++OctetString BuildRtpPacket(const std::string &localIp, int localPort, const std::string &peerIp, int peerPort,
++                           uint32_t ssrc, uint16_t seq, uint32_t ts);
++
++} // namespace ims
++} // namespace nr::ue
+diff --git a/src/ue/ims/sip_stack.cpp b/src/ue/ims/sip_stack.cpp
+new file mode 100644
+index 0000000..817a1d4
+--- /dev/null
++++ b/src/ue/ims/sip_stack.cpp
+@@ -0,0 +1,624 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#include "sip_stack.hpp"
++
++#include <cctype>
++#include <cstring>
++#include <sstream>
++
++#include "digest.hpp"
++
++namespace nr::ue
++{
++namespace ims
++{
++
++namespace
++{
++
++std::string ToLower(const std::string &s)
++{
++    std::string out = s;
++    for (auto &c : out)
++        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
++    return out;
++}
++
++std::string Trim(const std::string &s)
++{
++    size_t begin = 0;
++    size_t end = s.size();
++    while (begin < end && std::isspace(static_cast<unsigned char>(s[begin])))
++        begin++;
++    while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1])))
++        end--;
++    return s.substr(begin, end - begin);
++}
++
++// Parses "key=value" pairs possibly with quoted values.
++std::vector<std::pair<std::string, std::string>> ParseParameters(const std::string &s)
++{
++    std::vector<std::pair<std::string, std::string>> result;
++    std::string key;
++    std::string value;
++    bool inQuote = false;
++    bool readingKey = true;
++    bool readingValue = false;
++
++    auto flush = [&]()
++    {
++        if (!key.empty())
++            result.emplace_back(Trim(key), Trim(value));
++        key.clear();
++        value.clear();
++        readingKey = true;
++        readingValue = false;
++    };
++
++    for (size_t i = 0; i < s.size(); i++)
++    {
++        char c = s[i];
++        if (c == '"')
++        {
++            inQuote = !inQuote;
++            if (readingKey)
++                readingKey = false;
++            readingValue = true;
++            continue;
++        }
++        if (c == ',' && !inQuote)
++        {
++            flush();
++            continue;
++        }
++        if (c == '=' && !inQuote && !readingValue)
++        {
++            readingKey = false;
++            readingValue = true;
++            continue;
++        }
++        if (readingKey)
++            key.push_back(c);
++        else if (readingValue)
++            value.push_back(c);
++    }
++    flush();
++    return result;
++}
++
++std::string MakeHeader(const std::string &name, const std::string &value)
++{
++    return name + ": " + value + "\r\n";
++}
++
++// Extracts the ";tag=xxx" value from a header (From/To).
++std::string ExtractTag(const std::string &header)
++{
++    auto tagPos = header.rfind(";tag=");
++    if (tagPos == std::string::npos)
++        return {};
++    std::string tag = header.substr(tagPos + 5);
++    tag = Trim(tag);
++    return tag;
++}
++
++// The user part of the identity, used in Contact (the identity's domain must not be repeated).
++std::string ContactUser(const ImsConfig &config)
++{
++    std::string user = config.privateIdentity;
++    if (user.rfind("sip:", 0) == 0)
++        user = user.substr(4);
++    auto atPos = user.find('@');
++    if (atPos != std::string::npos)
++        user = user.substr(0, atPos);
++    return user;
++}
++
++// The local Contact header value for this UE.
++std::string ContactHeader(const ImsConfig &config, const std::string &localIp)
++{
++    return "<sip:" + ContactUser(config) + "@" + localIp + ":" + std::to_string(config.sipPort) + ";ob>";
++}
++
++SipAuthChallenge ParseAuthChallenge(const std::string &headerValue)
++{
++    SipAuthChallenge ch{};
++    auto params = ParseParameters(headerValue);
++    for (auto &kv : params)
++    {
++        std::string k = ToLower(kv.first);
++        if (k == "realm")
++            ch.realm = kv.second;
++        else if (k == "nonce")
++            ch.nonce = kv.second;
++        else if (k == "algorithm")
++            ch.algorithm = kv.second;
++        else if (k == "qop")
++        {
++            std::string token;
++            for (char c : kv.second)
++            {
++                if (c == ',' || std::isspace(static_cast<unsigned char>(c)))
++                {
++                    if (!token.empty())
++                    {
++                        ch.qopOptions.push_back(Trim(token));
++                        token.clear();
++                    }
++                }
++                else
++                {
++                    token.push_back(c);
++                }
++            }
++            if (!token.empty())
++                ch.qopOptions.push_back(Trim(token));
++        }
++    }
++    return ch;
++}
++
++} // namespace
++
++std::string RegistrarUri(const ImsConfig &config)
++{
++    std::string registrar = config.registrar;
++    if (registrar.rfind("sip:", 0) != 0)
++        registrar = "sip:" + registrar;
++    return registrar;
++}
++
++std::string BuildRegister(const ImsConfig &config, const std::string &localIp, int cseq, const std::string &callId,
++                          const std::string &branch, const std::string &tag, const std::string &authHeader)
++{
++    std::string registrar = RegistrarUri(config);
++
++    std::string fromTo = config.publicIdentity;
++    if (fromTo.rfind("sip:", 0) != 0 && fromTo.rfind("sips:", 0) != 0)
++        fromTo = "sip:" + fromTo;
++
++    std::string body;
++    body += "REGISTER " + registrar + " SIP/2.0\r\n";
++    body += MakeHeader("Via", "SIP/2.0/UDP " + localIp + ":" + std::to_string(config.sipPort) + ";rport;branch=" + branch);
++    body += MakeHeader("Max-Forwards", "70");
++    body += MakeHeader("From", "<" + fromTo + ">;tag=" + tag);
++    body += MakeHeader("To", "<" + fromTo + ">");
++    body += MakeHeader("Call-ID", callId);
++    body += MakeHeader("CSeq", std::to_string(cseq) + " REGISTER");
++    body += MakeHeader("Contact", ContactHeader(config, localIp));
++    body += MakeHeader("Expires", std::to_string(config.expires));
++    if (!authHeader.empty())
++        body += MakeHeader("Authorization", authHeader);
++    body += "Content-Length: 0\r\n";
++    body += "\r\n";
++    return body;
++}
++
++std::string BuildInvite(const ImsConfig &config, const std::string &localIp, const std::string &remoteUri,
++                        const std::string &serviceRoute, const std::string &callId, const std::string &branch,
++                        const std::string &tag, const std::string &authHeader)
++{
++    std::string fromTo = config.publicIdentity;
++    if (fromTo.rfind("sip:", 0) != 0 && fromTo.rfind("sips:", 0) != 0)
++        fromTo = "sip:" + fromTo;
++
++    std::string sdp = PlaceholderSdp(localIp);
++
++    std::string body;
++    body += "INVITE " + remoteUri + " SIP/2.0\r\n";
++    body += MakeHeader("Via", "SIP/2.0/UDP " + localIp + ":" + std::to_string(config.sipPort) + ";rport;branch=" + branch);
++    body += MakeHeader("Route", "<sip:" + config.pcscf + ":" + std::to_string(config.pcscfPort) + ";lr>");
++    if (!serviceRoute.empty())
++        body += MakeHeader("Route", serviceRoute);
++    body += MakeHeader("Max-Forwards", "70");
++    body += MakeHeader("From", "<" + fromTo + ">;tag=" + tag);
++    body += MakeHeader("To", "<" + remoteUri + ">");
++    body += MakeHeader("Call-ID", callId);
++    body += MakeHeader("CSeq", "1 INVITE");
++    body += MakeHeader("Contact", ContactHeader(config, localIp));
++    if (!authHeader.empty())
++        body += MakeHeader("Authorization", authHeader);
++    body += MakeHeader("Content-Type", "application/sdp");
++    body += MakeHeader("Content-Length", std::to_string(sdp.size()));
++    body += "\r\n";
++    body += sdp;
++    return body;
++}
++
++std::string BuildInDialogRequest(const std::string &method, const std::string &localIp, const ImsConfig &config,
++                                 const std::string &remoteUri, const std::string &remoteContact,
++                                 const std::string &routeSet, const std::string &callId, const std::string &branch,
++                                 const std::string &from, const std::string &fromTag, const std::string &to,
++                                 const std::string &toTag, int cseq)
++{
++    // The request target is the remote Contact (URI without the angle brackets), falling back to the dialed URI.
++    std::string target = remoteContact;
++    if (target.rfind('<') != std::string::npos && target.rfind('>') != std::string::npos)
++        target = target.substr(target.find('<') + 1, target.find('>') - target.find('<') - 1);
++    if (target.empty())
++        target = remoteUri;
++
++    std::string body;
++    body += method + " " + target + " SIP/2.0\r\n";
++    body += MakeHeader("Via", "SIP/2.0/UDP " + localIp + ":" + std::to_string(config.sipPort) + ";rport;branch=" + branch);
++    // routeSet is a comma-separated list of Route header values (e.g. "<sip:pcscf;lr>,<sip:orig@...;lr>").
++    std::string token;
++    for (char c : routeSet)
++    {
++        if (c == ',')
++        {
++            if (!token.empty())
++            {
++                body += MakeHeader("Route", Trim(token));
++                token.clear();
++            }
++        }
++        else
++        {
++            token.push_back(c);
++        }
++    }
++    if (!token.empty())
++        body += MakeHeader("Route", Trim(token));
++    body += MakeHeader("Max-Forwards", "70");
++    body += MakeHeader("From", "<" + from + ">;tag=" + fromTag);
++    body += MakeHeader("To", "<" + to + ">" + (toTag.empty() ? std::string{} : std::string{";tag=" + toTag}));
++    body += MakeHeader("Call-ID", callId);
++    body += MakeHeader("CSeq", std::to_string(cseq) + " " + method);
++    body += MakeHeader("Contact", ContactHeader(config, localIp));
++    body += "Content-Length: 0\r\n";
++    body += "\r\n";
++    return body;
++}
++
++std::string BuildErrorAck(const ImsConfig &config, const std::string &localIp, const std::string &remoteUri,
++                          const std::string &callId, const std::string &fromTag, int cseq)
++{
++    // ACK for a non-2xx final response to an INVITE (RFC 3261 17.1.1.3): request-URI is the
++    // INVITE request-URI, no Route/Contact, same Call-ID/branch semantics as the failed transaction.
++    std::string body;
++    body += "ACK " + remoteUri + " SIP/2.0\r\n";
++    body += MakeHeader("Via", "SIP/2.0/UDP " + localIp + ":" + std::to_string(config.sipPort) +
++                               ";rport;branch=z9hG4bK" + std::to_string(cseq));
++    body += MakeHeader("Max-Forwards", "70");
++    body += MakeHeader("From", "<" + config.publicIdentity + ">;tag=" + fromTag);
++    body += MakeHeader("To", "<" + remoteUri + ">");
++    body += MakeHeader("Call-ID", callId);
++    body += MakeHeader("CSeq", std::to_string(cseq) + " ACK");
++    body += "Content-Length: 0\r\n";
++    body += "\r\n";
++    return body;
++}
++
++std::string BuildSipReply(const ImsConfig &config, const std::string &localIp, int statusCode,
++                          const std::string &reasonPhrase, const SipRequestInfo &req, const std::string &toTag,
++                          const std::string &body)
++{
++    std::string out;
++    out += "SIP/2.0 " + std::to_string(statusCode) + " " + reasonPhrase + "\r\n";
++    if (!req.viaAll.empty())
++        out += req.viaAll + "\r\n";
++    else if (!req.via.empty())
++        out += MakeHeader("Via", req.via);
++    // 2xx (and 18x) responses must echo the Record-Route set (RFC 3261 12.1.1): the caller
++    // builds its in-dialog route set from it.
++    if (!req.recordRoutes.empty())
++    {
++        for (const auto &rr : req.recordRoutes)
++            out += MakeHeader("Record-Route", rr);
++    }
++    if (!req.from.empty())
++        out += MakeHeader("From", req.from);
++    out += MakeHeader("To", req.to + (toTag.empty() ? std::string{} : std::string{";tag=" + toTag}));
++    if (!req.callId.empty())
++        out += MakeHeader("Call-ID", req.callId);
++    out += MakeHeader("CSeq", std::to_string(req.cseq) + " " + req.cseqMethod);
++    out += MakeHeader("Contact", ContactHeader(config, localIp));
++    if (!body.empty())
++    {
++        out += MakeHeader("Content-Type", "application/sdp");
++        out += MakeHeader("Content-Length", std::to_string(body.size()));
++        out += "\r\n";
++        out += body;
++    }
++    else
++    {
++        out += "Content-Length: 0\r\n";
++        out += "\r\n";
++    }
++    return out;
++}
++
++std::string PlaceholderSdp(const std::string &localIp)
++{
++    // A valid single-audio-line SDP the rtpengine can rewrite. Media is not actually sent in P2 (signaling only),
++    // but the offer must be structurally acceptable (m=audio 0 was rejected by rtpengine/pjsua with 488).
++    return "v=0\r\no=- 0 0 IN IP4 " + localIp + "\r\ns=-\r\nc=IN IP4 " + localIp + "\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
++}
++
++std::string BuildMediaSdp(const std::string &localIp, int mediaPort)
++{
++    return "v=0\r\no=- 0 0 IN IP4 " + localIp + "\r\ns=-\r\nc=IN IP4 " + localIp + "\r\nt=0 0\r\nm=audio " +
++           std::to_string(mediaPort) + " RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
++}
++
++bool ParseSdpMedia(const std::string &sdp, std::string &outAddress, int &outPort)
++{
++    std::istringstream stream(sdp);
++    std::string line;
++    bool haveAddress = false;
++    while (std::getline(stream, line))
++    {
++        line = Trim(line);
++        if (line.rfind("c=", 0) == 0 && !haveAddress)
++        {
++            // c=IN IP4 <addr>
++            auto parts = line.substr(2);
++            auto sp = parts.rfind(' ');
++            if (sp != std::string::npos)
++            {
++                outAddress = Trim(parts.substr(sp + 1));
++                haveAddress = true;
++            }
++        }
++        else if (line.rfind("m=audio ", 0) == 0)
++        {
++            // m=audio <port> RTP/AVP ...
++            auto rest = Trim(line.substr(8));
++            auto sp = rest.find(' ');
++            auto portStr = sp == std::string::npos ? rest : rest.substr(0, sp);
++            outPort = std::atoi(portStr.c_str());
++            if (outPort > 0 && haveAddress)
++                return true;
++        }
++    }
++    return haveAddress && outPort > 0;
++}
++
++SipResponseInfo ParseSipResponse(const std::string &text)
++{
++    SipResponseInfo info;
++    std::istringstream stream(text);
++    std::string line;
++
++    if (!std::getline(stream, line))
++        return info;
++    line = Trim(line);
++    if (line.rfind("SIP/2.0 ", 0) == 0)
++    {
++        auto space1 = line.find(' ');
++        auto space2 = line.find(' ', space1 + 1);
++        if (space1 != std::string::npos && space2 != std::string::npos)
++        {
++            std::string code = line.substr(space1 + 1, space2 - space1 - 1);
++            info.statusCode = std::atoi(code.c_str());
++            info.reasonPhrase = line.substr(space2 + 1);
++        }
++    }
++    else
++    {
++        return info;
++    }
++
++    auto processHeader = [&info](const std::string &name, const std::string &value)
++    {
++        std::string lname = ToLower(name);
++        if (lname == "call-id")
++            info.callId = Trim(value);
++        else if (lname == "expires")
++            info.expires = std::atoi(Trim(value).c_str());
++        else if (lname == "www-authenticate")
++            info.challenge = ParseAuthChallenge(value);
++        else if (lname == "service-route")
++            info.serviceRoutes.push_back(Trim(value));
++        else if (lname == "to")
++        {
++            auto val = Trim(value);
++            info.toTag = ExtractTag(val);
++        }
++        else if (lname == "contact")
++            info.contact = Trim(value);
++        else if (lname == "record-route")
++            info.recordRoutes.push_back(Trim(value));
++        else if (lname == "cseq")
++        {
++            auto cseq = Trim(value);
++            auto sp = cseq.find(' ');
++            if (sp != std::string::npos)
++                info.cseq = std::atoi(cseq.substr(0, sp).c_str());
++            else
++                info.cseq = std::atoi(cseq.c_str());
++        }
++    };
++
++    std::string headerName;
++    std::string headerValue;
++    std::string body;
++    bool inBody = false;
++    while (std::getline(stream, line))
++    {
++        if (inBody)
++        {
++            body += line + "\n";
++            continue;
++        }
++        if (line == "\r" || line.empty())
++        {
++            inBody = true;
++            continue;
++        }
++        if (!line.empty() && (line[0] == ' ' || line[0] == '\t') && !headerName.empty())
++        {
++            headerValue += " " + Trim(line);
++            continue;
++        }
++        if (!headerName.empty())
++            processHeader(headerName, headerValue);
++        headerName.clear();
++        headerValue.clear();
++
++        auto colon = line.find(':');
++        if (colon != std::string::npos)
++        {
++            headerName = Trim(line.substr(0, colon));
++            headerValue = Trim(line.substr(colon + 1));
++        }
++    }
++    if (!headerName.empty())
++        processHeader(headerName, headerValue);
++    while (!body.empty() && body.back() == '\n')
++        body.pop_back();
++    info.body = body;
++
++    return info;
++}
++
++std::vector<std::string> ExtractRoutes(const std::string &text)
++{
++    std::vector<std::string> routes;
++    std::istringstream stream(text);
++    std::string line;
++    while (std::getline(stream, line))
++    {
++        auto colon = line.find(':');
++        if (colon == std::string::npos)
++            continue;
++        std::string name = ToLower(Trim(line.substr(0, colon)));
++        if (name != "route")
++            continue;
++        std::string value = Trim(line.substr(colon + 1));
++        // Multiple Route headers may be comma-separated as well; split on ">,<".
++        std::string token;
++        for (char c : value)
++        {
++            if (c == ',')
++            {
++                if (!token.empty())
++                {
++                    routes.push_back(Trim(token));
++                    token.clear();
++                }
++            }
++            else
++            {
++                token.push_back(c);
++            }
++        }
++        if (!token.empty())
++            routes.push_back(Trim(token));
++    }
++    return routes;
++}
++
++SipRequestInfo ParseSipRequest(const std::string &text)
++{
++    SipRequestInfo info;
++    std::istringstream stream(text);
++    std::string line;
++
++    if (!std::getline(stream, line))
++        return info;
++    line = Trim(line);
++    auto space1 = line.find(' ');
++    auto space2 = line.find(' ', space1 + 1);
++    if (space1 == std::string::npos || space2 == std::string::npos)
++        return info;
++    info.method = line.substr(0, space1);
++    info.requestUri = line.substr(space1 + 1, space2 - space1 - 1);
++
++    std::string headerName;
++    std::string headerValue;
++    std::string body;
++    bool inBody = false;
++    auto process = [&info](const std::string &name, const std::string &value)
++    {
++        std::string lname = ToLower(name);
++        if (lname == "via")
++        {
++            // UAS replies must echo the full Via chain so each proxy can strip its own
++            // Via and forward the reply upstream; keep every header occurrence.
++            if (info.via.empty())
++                info.via = Trim(value);
++            info.viaAll += (info.viaAll.empty() ? std::string{} : std::string{"\r\n"}) + "Via: " + Trim(value);
++        }
++        else if (lname == "from")
++        {
++            auto val = Trim(value);
++            info.from = val;
++            info.fromTag = ExtractTag(val);
++        }
++        else if (lname == "to")
++        {
++            auto val = Trim(value);
++            info.to = val;
++            info.toTag = ExtractTag(val);
++        }
++        else if (lname == "call-id")
++            info.callId = Trim(value);
++        else if (lname == "cseq")
++        {
++            auto cseq = Trim(value);
++            auto sp = cseq.find(' ');
++            if (sp != std::string::npos)
++            {
++                info.cseq = std::atoi(cseq.substr(0, sp).c_str());
++                info.cseqMethod = Trim(cseq.substr(sp + 1));
++            }
++        }
++        else if (lname == "contact")
++            info.contact = Trim(value);
++        else if (lname == "record-route")
++            info.recordRoutes.push_back(Trim(value));
++    };
++    while (std::getline(stream, line))
++    {
++        if (inBody)
++        {
++            body += line + "\n";
++            continue;
++        }
++        if (line == "\r" || line.empty())
++        {
++            if (!headerName.empty())
++                process(headerName, headerValue);
++            headerName.clear();
++            headerValue.clear();
++            inBody = true;
++            continue;
++        }
++        if (!line.empty() && (line[0] == ' ' || line[0] == '\t') && !headerName.empty())
++        {
++            headerValue += " " + Trim(line);
++            continue;
++        }
++        if (!headerName.empty())
++            process(headerName, headerValue);
++        headerName.clear();
++        headerValue.clear();
++
++        auto colon = line.find(':');
++        if (colon != std::string::npos)
++        {
++            headerName = Trim(line.substr(0, colon));
++            headerValue = Trim(line.substr(colon + 1));
++        }
++    }
++    if (!headerName.empty() && !inBody)
++        process(headerName, headerValue);
++
++    // Normalize the body: strip the trailing \n -> we join with \n above.
++    while (!body.empty() && body.back() == '\n')
++        body.pop_back();
++    info.body = body;
++    return info;
++}
++
++
++} // namespace ims
++} // namespace nr::ue
+diff --git a/src/ue/ims/sip_stack.hpp b/src/ue/ims/sip_stack.hpp
+new file mode 100644
+index 0000000..4ee4afc
+--- /dev/null
++++ b/src/ue/ims/sip_stack.hpp
+@@ -0,0 +1,115 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#pragma once
++
++#include <optional>
++#include <string>
++#include <vector>
++
++#include <utils/octet_string.hpp>
++
++#include "config.hpp"
++
++namespace nr::ue
++{
++namespace ims
++{
++
++struct SipAuthChallenge
++{
++    std::string realm;
++    std::string nonce;
++    std::vector<std::string> qopOptions;
++    std::string algorithm{"MD5"};
++};
++
++struct SipResponseInfo
++{
++    int statusCode{0};
++    std::string reasonPhrase;
++    std::string callId;
++    std::string toTag;
++    std::string contact;
++    int cseq{0};
++    std::optional<SipAuthChallenge> challenge;
++    std::optional<int> expires;
++    std::vector<std::string> serviceRoutes;
++    std::vector<std::string> recordRoutes;
++    std::string body;
++};
++
++// A parsed SIP request (INVITE/ACK/BYE received on the downlink).
++struct SipRequestInfo
++{
++    std::string method;
++    std::string requestUri;
++    std::string via;
++    std::string viaAll; // all Via headers ("Via: ...\r\nVia: ...") for UAS replies
++    std::string from;
++    std::string fromTag;
++    std::string to;
++    std::string toTag;
++    std::string callId;
++    int cseq{0};
++    std::string cseqMethod;
++    std::string contact;
++    std::string body;
++    std::vector<std::string> recordRoutes;
++};
++
++// The SIP URI of the registrar (used as the digest uri and request target).
++std::string RegistrarUri(const ImsConfig &config);
++
++// Builds a REGISTER request. authHeader empty means the initial (non-authenticated) attempt.
++std::string BuildRegister(const ImsConfig &config, const std::string &localIp, int cseq, const std::string &callId,
++                          const std::string &branch, const std::string &tag, const std::string &authHeader);
++
++// Builds an INVITE request (caller side). Two Route headers: P-CSCF + Service-Route. authHeader empty = initial.
++std::string BuildInvite(const ImsConfig &config, const std::string &localIp, const std::string &remoteUri,
++                        const std::string &serviceRoute, const std::string &callId, const std::string &branch,
++                        const std::string &tag, const std::string &authHeader);
++
++// Builds an in-dialog request (ACK/BYE). routeSet is the list of Route header values.
++std::string BuildInDialogRequest(const std::string &method, const std::string &localIp, const ImsConfig &config,
++                                 const std::string &remoteUri, const std::string &remoteContact,
++                                 const std::string &routeSet, const std::string &callId, const std::string &branch,
++                                 const std::string &from, const std::string &fromTag, const std::string &to,
++                                 const std::string &toTag, int cseq);
++
++// Builds an ACK for a non-2xx final response to an INVITE (RFC 3261 17.1.1.3): no Route/Contact.
++std::string BuildErrorAck(const ImsConfig &config, const std::string &localIp, const std::string &remoteUri,
++                          const std::string &callId, const std::string &fromTag, int cseq);
++
++// Builds a response to an incoming request (echoes Via/From/Call-ID/CSeq, adds local To tag + Contact).
++std::string BuildSipReply(const ImsConfig &config, const std::string &localIp, int statusCode,
++                          const std::string &reasonPhrase, const SipRequestInfo &req, const std::string &toTag,
++                          const std::string &body);
++
++// Parses a SIP response (status line + headers).
++SipResponseInfo ParseSipResponse(const std::string &text);
++
++// Parses a SIP request (method line + headers).
++SipRequestInfo ParseSipRequest(const std::string &text);
++
++// Placeholder SDP (valid media offer that rtpengine can rewrite; media is not actually exercised in P2).
++std::string PlaceholderSdp(const std::string &localIp);
++
++// Builds the media SDP (P3): PCMU audio on the configured local media port (P2 kept a
++// fixed port so rtpengine would accept the offer; P3 makes it configurable).
++std::string BuildMediaSdp(const std::string &localIp, int mediaPort);
++
++// Parses the c= (connection address) and m= (media port) of an SDP answer/offer.
++// Returns true and fills out the media address when both are present.
++bool ParseSdpMedia(const std::string &sdp, std::string &outAddress, int &outPort);
++
++// Extracts the Route header values from a SIP message text.
++std::vector<std::string> ExtractRoutes(const std::string &text);
++
++} // namespace ims
++} // namespace nr::ue
+diff --git a/src/ue/nas/sm/establishment.cpp b/src/ue/nas/sm/establishment.cpp
+index 4623a14..0134a85 100644
+--- a/src/ue/nas/sm/establishment.cpp
++++ b/src/ue/nas/sm/establishment.cpp
+@@ -103,6 +103,8 @@ void NasSm::sendEstablishmentRequest(const SessionConfig &config)
+         nas::EProtocolConfigId::CONT_ID_UP_IP_ADDRESS_ALLOCATION_VIA_NAS_SIGNALLING, true, OctetString::Empty()));
+     opt.additionalParams.push_back(std::make_unique<nas::ProtocolConfigurationItem>(
+         nas::EProtocolConfigId::CONT_ID_DOWN_DNS_SERVER_IPV4_ADDRESS, true, OctetString::Empty()));
++    opt.additionalParams.push_back(std::make_unique<nas::ProtocolConfigurationItem>(
++        nas::EProtocolConfigId::CONT_ID_UP_P_CSCF_IPV4_ADDRESS_REQUEST, true, OctetString::Empty()));
+ 
+     nas::IEExtendedProtocolConfigurationOptions iePco{};
+     iePco.configurationProtocol = nas::EConfigurationProtocol::PPP;
+@@ -170,6 +172,28 @@ void NasSm::receiveEstablishmentAccept(const nas::PduSessionEstablishmentAccept
+     else
+         pduSession->pduAddress = {};
+ 
++    // P4: parse the EPCO P-CSCF address (0x000C container, 4-byte IPv4) from the Accept.
++    pduSession->epcoPcscf = {};
++    if (msg.extendedProtocolConfigurationOptions.has_value())
++    {
++        auto &epco = *msg.extendedProtocolConfigurationOptions;
++        auto pco = nas::ProtocolConfigurationOptions::Decode(epco.options.data(), epco.options.length(), false);
++        if (pco)
++        {
++            for (auto &item : pco->additionalParams)
++            {
++                if (item->id == nas::EProtocolConfigId::CONT_ID_UP_P_CSCF_IPV4_ADDRESS_REQUEST &&
++                    item->content.length() == 4)
++                {
++                    const uint8_t *d = item->content.data();
++                    pduSession->epcoPcscf =
++                        std::to_string(d[0]) + "." + std::to_string(d[1]) + "." + std::to_string(d[2]) + "." +
++                        std::to_string(d[3]);
++                    break;
++                }            }
++        }
++    }
++
+     auto statusUpdate = std::make_unique<NmUeStatusUpdate>(NmUeStatusUpdate::SESSION_ESTABLISHMENT);
+     statusUpdate->pduSession = pduSession;
+     m_base->appTask->push(std::move(statusUpdate));
+diff --git a/src/ue/nts.hpp b/src/ue/nts.hpp
+index 713ea2e..f65563c 100644
+--- a/src/ue/nts.hpp
++++ b/src/ue/nts.hpp
+@@ -346,4 +346,31 @@ struct NmUeCliCommand : NtsMessage
+     }
+ };
+ 
++struct NmUeAppToIms : NtsMessage
++{
++    enum PR
++    {
++        SESSION_BOUND,
++        SESSION_RELEASED,
++        DOWNLINK_DATA,
++        CLI_COMMAND,
++    } present;
++
++    // SESSION_BOUND / SESSION_RELEASED
++    int psi{};
++    std::string localIp{};
++    std::string pcscf{}; // P-CSCF from EPCO (0x000C), empty when not provided
++
++    // DOWNLINK_DATA
++    OctetString data{};
++
++    // CLI_COMMAND
++    std::unique_ptr<app::UeCliCommand> cmd{};
++    InetAddress address{};
++
++    explicit NmUeAppToIms(PR present) : NtsMessage(NtsMessageType::UE_APP_TO_IMS), present(present)
++    {
++    }
++};
++
+ } // namespace nr::ue
+\ No newline at end of file
+diff --git a/src/ue/rls/udp_task.cpp b/src/ue/rls/udp_task.cpp
+index 466259d..278e169 100644
+--- a/src/ue/rls/udp_task.cpp
++++ b/src/ue/rls/udp_task.cpp
+@@ -87,6 +87,10 @@ void RlsUdpTask::send(int cellId, const rls::RlsMessage &msg)
+         auto sti = m_cellIdToSti[cellId];
+         sendRlsPdu(m_cells[sti].address, msg);
+     }
++    else
++    {
++        m_logger->err("RLS uplink dropped: cellId=%d not in m_cellIdToSti (size=%zu)", cellId, m_cellIdToSti.size());
++    }
+ }
+ 
+ void RlsUdpTask::receiveRlsPdu(const InetAddress &addr, std::unique_ptr<rls::RlsMessage> &&msg)
+diff --git a/src/ue/types.hpp b/src/ue/types.hpp
+index f4a315e..a4245b8 100644
+--- a/src/ue/types.hpp
++++ b/src/ue/types.hpp
+@@ -9,6 +9,7 @@
+ #pragma once
+ 
+ #include "timer.hpp"
++#include "ims/config.hpp"
+ 
+ #include <array>
+ #include <atomic>
+@@ -35,6 +36,7 @@ class UeAppTask;
+ class NasTask;
+ class UeRrcTask;
+ class UeRlsTask;
++class ImsClientTask;
+ class UserEquipment;
+ 
+ struct UeCellDesc
+@@ -115,6 +117,8 @@ struct UeConfig
+     bool useNamespace{false};
+     std::optional<std::string> nsNamePrefix{};
+ 
++    ImsConfig ims{};
++
+     struct
+     {
+         bool mps{};
+@@ -214,6 +218,7 @@ struct TaskBase
+     NasTask *nasTask{};
+     UeRrcTask *rrcTask{};
+     UeRlsTask *rlsTask{};
++    ImsClientTask *imsTask{};
+ };
+ 
+ struct RrcTimers
+@@ -357,6 +362,7 @@ struct PduSession
+     std::optional<nas::IESessionAmbr> sessionAmbr{};
+     std::optional<nas::IEQoSFlowDescriptions> authorizedQoSFlowDescriptions{};
+     std::optional<nas::IEPduAddress> pduAddress{};
++    std::optional<std::string> epcoPcscf{}; // P-CSCF IPv4 from EPCO (0x000C), if provided
+ 
+     explicit PduSession(int psi) : psi(psi)
+     {
+diff --git a/src/ue/ue.cpp b/src/ue/ue.cpp
+index 2f80ba9..718cb6b 100644
+--- a/src/ue/ue.cpp
++++ b/src/ue/ue.cpp
+@@ -9,6 +9,7 @@
+ #include "ue.hpp"
+ 
+ #include "app/task.hpp"
++#include "ims/ims.hpp"
+ #include "nas/task.hpp"
+ #include "rls/task.hpp"
+ #include "rrc/task.hpp"
+@@ -31,6 +32,8 @@ UserEquipment::UserEquipment(UeConfig *config, app::IUeController *ueController,
+     base->rrcTask = new UeRrcTask(base);
+     base->appTask = new UeAppTask(base);
+     base->rlsTask = new UeRlsTask(base);
++    if (config->ims.enable)
++        base->imsTask = new ImsClientTask(base);
+ 
+     taskBase = base;
+ }
+@@ -41,11 +44,14 @@ UserEquipment::~UserEquipment()
+     taskBase->rrcTask->quit();
+     taskBase->rlsTask->quit();
+     taskBase->appTask->quit();
++    if (taskBase->imsTask)
++        taskBase->imsTask->quit();
+ 
+     delete taskBase->nasTask;
+     delete taskBase->rrcTask;
+     delete taskBase->rlsTask;
+     delete taskBase->appTask;
++    delete taskBase->imsTask;
+ 
+     delete taskBase->logBase;
+ 
+@@ -58,6 +64,8 @@ void UserEquipment::start()
+     taskBase->rrcTask->start();
+     taskBase->rlsTask->start();
+     taskBase->appTask->start();
++    if (taskBase->imsTask)
++        taskBase->imsTask->start();
+ }
+ 
+ void UserEquipment::pushCommand(std::unique_ptr<app::UeCliCommand> cmd, const InetAddress &address)
+diff --git a/src/utils/nts.hpp b/src/utils/nts.hpp
+index d363e9d..e380731 100644
+--- a/src/utils/nts.hpp
++++ b/src/utils/nts.hpp
+@@ -48,6 +48,7 @@ enum class NtsMessageType
+ 
+     UE_APP_TO_TUN,
+     UE_APP_TO_NAS,
++    UE_APP_TO_IMS,
+     UE_TUN_TO_APP,
+     UE_RRC_TO_NAS,
+     UE_NAS_TO_RRC,
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+new file mode 100644
+index 0000000..a23e62f
+--- /dev/null
++++ b/tests/CMakeLists.txt
+@@ -0,0 +1,24 @@
++enable_testing()
++
++add_executable(ims-tests
++  ims_tests.cpp
++  ../src/ue/ims/auth.cpp
++  ../src/ue/ims/digest.cpp
++  ../src/ue/ims/packet.cpp
++  ../src/ue/ims/sip_stack.cpp
++  ../src/lib/crypt/milenage.cpp
++  ../src/lib/crypt/mac.cpp
++  ../src/ext/crypt-ext/aes.c
++  ../src/ext/crypt-ext/cmac.c
++  ../src/ext/crypt-ext/hmac-sha256.c
++  ../src/ext/crypt-ext/milenage.c
++  ../src/ext/crypt-ext/sha256.c
++  ../src/ext/crypt-ext/x963kdf.c
++  ../src/utils/octet_string.cpp
++  ../src/utils/common.cpp
++)
++
++target_include_directories(ims-tests PRIVATE ../src ../src/ue/ims ../src/ext)
++target_compile_options(ims-tests PRIVATE -Wall -Wextra)
++
++add_test(NAME ims-tests COMMAND ims-tests)
+diff --git a/tests/ims_tests.cpp b/tests/ims_tests.cpp
+new file mode 100644
+index 0000000..80b0f16
+--- /dev/null
++++ b/tests/ims_tests.cpp
+@@ -0,0 +1,430 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++// Plain-assert unit tests for the self-contained IMS pure functions
++// (digest, packet transport, SIP codec). No external test framework.
++
++#include <cstdio>
++#include <cstring>
++#include <string>
++
++#include "auth.hpp"
++#include "config.hpp"
++#include "digest.hpp"
++#include "packet.hpp"
++#include "sip_stack.hpp"
++
++using namespace nr::ue;
++using namespace nr::ue::ims;
++
++namespace
++{
++
++int g_failures = 0;
++
++template <typename T>
++std::string TestStr(const T &v)
++{
++    return std::to_string(v);
++}
++
++std::string TestStr(const std::string &v)
++{
++    return v;
++}
++
++std::string TestStr(const char *v)
++{
++    return v ? v : "(null)";
++}
++
++#define CHECK(cond)                                                                                                    \
++    do                                                                                                                 \
++    {                                                                                                                  \
++        if (!(cond))                                                                                                   \
++        {                                                                                                              \
++            std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);                                      \
++            g_failures++;                                                                                              \
++        }                                                                                                              \
++    } while (0)
++
++#define CHECK_EQ(a, b)                                                                                                 \
++    do                                                                                                                 \
++    {                                                                                                                  \
++        auto va = (a);                                                                                                 \
++        auto vb = (b);                                                                                                 \
++        if (!(va == vb))                                                                                               \
++        {                                                                                                              \
++            std::fprintf(stderr, "FAIL %s:%d: %s == %s (%s vs %s)\n", __FILE__, __LINE__, #a, #b,                      \
++                         TestStr(va).c_str(), TestStr(vb).c_str());                                                    \
++            g_failures++;                                                                                              \
++        }                                                                                                              \
++    } while (0)
++
++ImsConfig MakeConfig()
++{
++    ImsConfig c;
++    c.sipPort = 5060;
++    c.pcscf = "172.21.0.21";
++    c.pcscfPort = 5060;
++    c.registrar = "ims.mnc001.mcc001.3gppnetwork.org";
++    c.publicIdentity = "sip:001011234567895@ims.mnc001.mcc001.3gppnetwork.org";
++    c.privateIdentity = "001011234567895@ims.mnc001.mcc001.3gppnetwork.org";
++    c.realm = "ims.mnc001.mcc001.3gppnetwork.org";
++    c.password = "8baf473f2f8fd09487cccbd7097c6862";
++    return c;
++}
++
++// Independent RFC 768 checksum reference (the test computes its own, not the module's).
++uint16_t RefChecksum(const uint8_t *data, size_t len)
++{
++    uint32_t sum = 0;
++    for (size_t i = 0; i + 1 < len; i += 2)
++        sum += (data[i] << 8) | data[i + 1];
++    if (len % 2 == 1)
++        sum += data[len - 1] << 8;
++    while (sum >> 16)
++        sum = (sum & 0xFFFF) + (sum >> 16);
++    return static_cast<uint16_t>(~sum);
++}
++
++uint16_t RefUdpChecksum(const OctetString &packet)
++{
++    // pseudo-header + UDP header + payload, with the checksum field zeroed
++    uint32_t sum = 0;
++    auto add16 = [&sum](const uint8_t *p, size_t len)
++    {
++        for (size_t i = 0; i + 1 < len; i += 2)
++            sum += (p[i] << 8) | p[i + 1];
++        if (len % 2 == 1)
++            sum += p[len - 1] << 8;
++    };
++    add16(packet.data() + 12, 8);            // src + dst IP
++    sum += 17;                               // zero + protocol
++    sum += ((packet.data()[24] << 8) | packet.data()[25]); // UDP length
++    add16(packet.data() + 20, 6);            // ports + length
++    add16(packet.data() + 28, packet.length() - 28); // payload
++    while (sum >> 16)
++        sum = (sum & 0xFFFF) + (sum >> 16);
++    return static_cast<uint16_t>(~sum);
++}
++
++void TestMd5Vectors()
++{
++    CHECK_EQ(Md5Hex(""), "d41d8cd98f00b204e9800998ecf8427e");
++    CHECK_EQ(Md5Hex("abc"), "900150983cd24fb0d6963f7d28e17f72");
++    CHECK_EQ(Md5Hex("The quick brown fox jumps over the lazy dog"), "9e107d9d372bb6826bd81d3542a419d6");
++}
++
++void TestPacketChecksums()
++{
++    const std::string payloads[] = {"", "a", "hello", "odd-length-payload-12345"};
++    for (auto &p : payloads)
++    {
++        auto pkt = BuildUdpPacket(p, "192.168.101.3", "172.21.0.21", 5060, 5060);
++        CHECK(static_cast<size_t>(pkt.length()) == 28 + p.size());
++        // IP header checksum: reference computed over the header with the checksum field zeroed.
++        uint8_t ipHdr[20];
++        std::memcpy(ipHdr, pkt.data(), 20);
++        ipHdr[10] = 0;
++        ipHdr[11] = 0;
++        uint16_t refIp = RefChecksum(ipHdr, 20);
++        uint16_t ip = (pkt.data()[10] << 8) | pkt.data()[11];
++        CHECK_EQ(ip, refIp);
++        // UDP checksum (pseudo-header + UDP header + payload)
++        uint16_t refUdp = RefUdpChecksum(pkt);
++        uint16_t udp = (pkt.data()[26] << 8) | pkt.data()[27];
++        CHECK_EQ(udp, refUdp);
++        // round trip: extract the payload back
++        CHECK(ExtractUdpPayload(pkt) == p);
++    }
++}
++
++void TestUdpDetection()
++{
++    auto pkt = BuildUdpPacket("sip", "192.168.101.3", "172.21.0.21", 5060, 5060);
++    CHECK(IsUdpPacket(pkt, 5060));
++    CHECK(!IsUdpPacket(pkt, 5061));
++    CHECK(!IsUdpPacket(OctetString{}, 5060));
++}
++
++void TestRtpPacket()
++{
++    // P3 media: one PCMU silence frame packet = IPv4/UDP header + 12B RTP header + 160B payload.
++    auto pkt = BuildRtpPacket("192.168.101.3", 50000, "172.21.0.16", 49170, 0xDEADBEEF, 0x1234, 0x01020304);
++    CHECK_EQ(pkt.length(), 28 + 12 + 160);
++    // UDP payload = RTP packet body
++    std::string body = ExtractUdpPayload(pkt);
++    CHECK_EQ(body.size(), 172u);
++    // RTP header: V=2, no padding/extension, PT=0 (PCMU)
++    CHECK_EQ(static_cast<uint8_t>(body[0]), 0x80u);
++    CHECK_EQ(static_cast<uint8_t>(body[1]), 0x00u);
++    // seq and timestamp round trip
++    CHECK_EQ(static_cast<uint8_t>(body[2]), 0x12u);
++    CHECK_EQ(static_cast<uint8_t>(body[3]), 0x34u);
++    CHECK_EQ(static_cast<uint8_t>(body[4]), 0x01u);
++    CHECK_EQ(static_cast<uint8_t>(body[7]), 0x04u);
++    // SSRC round trip
++    CHECK_EQ(static_cast<uint8_t>(body[8]), 0xDEu);
++    CHECK_EQ(static_cast<uint8_t>(body[11]), 0xEFu);
++    // silence payload present (160 bytes) and header checksum valid
++    CHECK_EQ(body[171], static_cast<char>(0xFF));
++    uint8_t ipHdr[20];
++    std::memcpy(ipHdr, pkt.data(), 20);
++    ipHdr[10] = 0;
++    ipHdr[11] = 0;
++    uint16_t refIp = RefChecksum(ipHdr, 20);
++    uint16_t ip = (pkt.data()[10] << 8) | pkt.data()[11];
++    CHECK_EQ(ip, refIp);
++    // UDP checksum matches the reference
++    uint16_t refUdp = RefUdpChecksum(pkt);
++    uint16_t udp = (pkt.data()[26] << 8) | pkt.data()[27];
++    CHECK_EQ(udp, refUdp);
++}
++
++void TestSdpMedia()
++{
++    // BuildMediaSdp + ParseSdpMedia round trip (P3).
++    auto sdp = BuildMediaSdp("192.168.101.3", 50000);
++    std::string addr;
++    int port = 0;
++    CHECK(ParseSdpMedia(sdp, addr, port));
++    CHECK(addr == "192.168.101.3");
++    CHECK_EQ(port, 50000);
++    // c= and m= present in the offer
++    CHECK(sdp.find("c=IN IP4 192.168.101.3") != std::string::npos);
++    CHECK(sdp.find("m=audio 50000 RTP/AVP 0") != std::string::npos);
++    // malformed SDP must not parse
++    CHECK(!ParseSdpMedia("v=0\r\ns=-\r\n", addr, port));
++}
++
++void TestRfc3310Password()
++{
++    // RFC 3310 A.1: IK/CK -> password = MD5(hex(ik) + ":" + hex(ck)).
++    OctetString ik = OctetString::FromHex("9743ffa4c969d5e0f6b6d0b5a56c3c5f");
++    OctetString ck = OctetString::FromHex("c22e0e5d506f02c0505fb87ba2c7a455");
++    CHECK(DeriveRfc3310Password(ik, ck) == "9706860c0f9437c8ecbee019de20014e");
++}
++
++void TestAkaChallenge()
++{
++    // Real vector produced by pyHSS (key=8baf..., opc=8e27..., amf=8000, sqn=401, plmn=00101f).
++    const std::string rand = "8e2b76ca9754ebea67f3dfbeb490ef9a";
++    const std::string autn = "42c0b55ca18380008e268f667958321d";
++    const std::string xres = "b148a494f3fb4077";
++
++    DigestAuth auth("001011234567896@ims.mnc001.mcc001.3gppnetwork.org", "8baf473f2f8fd09487cccbd7097c6862");
++    auth.setAkaCredentials(OctetString::FromHex("8e27b6af0e692e750f32667a3b14605d"),
++                           OctetString::FromHex("8000"));
++
++    SipAuthChallenge ch;
++    ch.realm = "ims.mnc001.mcc001.3gppnetwork.org";
++    ch.nonce = rand + autn; // RAND||AUTN (64 hex)
++    ch.algorithm = "AKAv1-MD5";
++    ch.qopOptions = {"auth"};
++    CHECK(auth.beginChallenge(ch, "fallback"));
++    CHECK(auth.isAka());
++    // AUTN validation: SEP bit + MAC-A must pass with the UERANSIM Milenage.
++    CHECK(auth.validateAutn());
++
++    auto hdr = auth.authorization("REGISTER", "sip:ims.mnc001.mcc001.3gppnetwork.org");
++    CHECK(hdr.find("algorithm=AKAv1-MD5") != std::string::npos);
++    CHECK(hdr.find("response=\"") != std::string::npos);
++    // response is a 32-hex digest
++    auto pos = hdr.find("response=\"");
++    CHECK(pos != std::string::npos);
++    CHECK(hdr.substr(pos + 10, 32).find('"') == std::string::npos);
++
++    // MD5 mode still works and reports non-AKA.
++    DigestAuth md5("u@d", "p");
++    SipAuthChallenge mch;
++    mch.realm = "r";
++    mch.nonce = "nonce123";
++    mch.qopOptions = {"auth"};
++    CHECK(md5.beginChallenge(mch, "r"));
++    CHECK(!md5.isAka());
++    CHECK(md5.authorization("REGISTER", "sip:r").find("algorithm=MD5") != std::string::npos);
++
++    // Corrupt AUTN must fail validation (MAC mismatch).
++    DigestAuth bad("u@d", "8baf473f2f8fd09487cccbd7097c6862");
++    bad.setAkaCredentials(OctetString::FromHex("8e27b6af0e692e750f32667a3b14605d"),
++                          OctetString::FromHex("8000"));
++    SipAuthChallenge bch;
++    bch.realm = "r";
++    bch.nonce = rand + "42c0b55ca18380008e268f667958321e"; // flipped last MAC byte
++    bch.algorithm = "AKAv1-MD5";
++    CHECK(bad.beginChallenge(bch, "r"));
++    CHECK(!bad.validateAutn());
++
++    // Base64-encoded nonce (pyHSS AVP 609 -> S-CSCF nonce) must parse too:
++    // base64(hex-rand || hex-autn) of the same vector.
++    auto b64 = [](const std::string &hex) {
++        static const char *tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++        std::string out;
++        int val = 0, bits = 0;
++        for (char c : hex)
++        {
++            val = (val << 4) | (std::isxdigit(static_cast<unsigned char>(c)) ? (c <= '9' ? c - '0' : std::tolower(c) - 'a' + 10) : 0);
++            bits += 4;
++            if (bits >= 6)
++            {
++                bits -= 6;
++                out.push_back(tbl[(val >> bits) & 0x3F]);
++            }
++        }
++        if (bits > 0)
++            out.push_back(tbl[(val << (6 - bits)) & 0x3F]);
++        while (out.size() % 4)
++            out.push_back('=');
++        return out;
++    };
++    DigestAuth b64auth("001011234567896@ims.mnc001.mcc001.3gppnetwork.org", "8baf473f2f8fd09487cccbd7097c6862");
++    b64auth.setAkaCredentials(OctetString::FromHex("8e27b6af0e692e750f32667a3b14605d"),
++                              OctetString::FromHex("8000"));
++    SipAuthChallenge bch2;
++    bch2.realm = "r";
++    bch2.nonce = b64(rand + autn);
++    bch2.algorithm = "AKAv1-MD5";
++    CHECK(b64auth.beginChallenge(bch2, "r"));
++    CHECK(b64auth.validateAutn());
++    CHECK(b64auth.authorization("REGISTER", "sip:r").find("algorithm=AKAv1-MD5") != std::string::npos);
++}
++
++void TestSipRoundTrip()
++{
++    auto c = MakeConfig();
++    auto invite = BuildInvite(c, "192.168.101.3", "sip:001011234567896@ims.mnc001.mcc001.3gppnetwork.org",
++                              "<sip:orig@scscf.ims.mnc001.mcc001.3gppnetwork.org:6060;lr>", "call-1@ip",
++                              "z9hG4bK-abc", "tag-1", "");
++    auto req = ParseSipRequest(invite);
++    CHECK(req.method == "INVITE");
++    CHECK(req.requestUri == "sip:001011234567896@ims.mnc001.mcc001.3gppnetwork.org");
++    CHECK(req.fromTag == "tag-1");
++    CHECK(req.callId == "call-1@ip");
++    CHECK(req.cseq == 1);
++    CHECK(req.cseqMethod == "INVITE");
++    CHECK(req.contact == "<sip:001011234567895@192.168.101.3:5060;ob>");
++
++    auto reply = BuildSipReply(c, "192.168.101.5", 200, "OK", req, "tag-callee", PlaceholderSdp("192.168.101.5"));
++    auto resp = ParseSipResponse(reply);
++    CHECK_EQ(resp.statusCode, 200);
++    CHECK(resp.toTag == "tag-callee");
++    CHECK(resp.callId == "call-1@ip");
++}
++
++void TestDigestResponse()
++{
++    // RFC 2617 worked example (GET /dir/index.html, qop=auth)
++    std::string r = DigestResponse("Mufasa", "testrealm@host.com", "Circle Of Life", "dcd98b7102dd2f0e8b11d0f600bfb0c093",
++                                   "00000001", "0a4f113b", "auth", "GET", "/dir/index.html");
++    CHECK_EQ(r, "6629fae49393a05397450978507c4ef1");
++}
++
++// Parse the response=... value out of an Authorization header.
++std::string ExtractResponseValue(const std::string &header)
++{
++    auto pos = header.find("response=\"");
++    if (pos == std::string::npos)
++        return {};
++    auto start = pos + 10;
++    auto end = header.find('"', start);
++    if (end == std::string::npos)
++        return {};
++    return header.substr(start, end - start);
++}
++
++std::string ExtractParam(const std::string &header, const std::string &name)
++{
++    auto pos = header.find(name + "=\"");
++    if (pos == std::string::npos)
++        return {};
++    auto start = pos + name.size() + 2;
++    auto end = header.find('"', start);
++    if (end == std::string::npos)
++        return {};
++    return header.substr(start, end - start);
++}
++
++void TestDigestAuth()
++{
++    DigestAuth auth("001011234567895@ims.mnc001.mcc001.3gppnetwork.org", "8baf473f2f8fd09487cccbd7097c6862");
++
++    // no challenge yet -> no header
++    CHECK(!auth.hasChallenge());
++    CHECK(auth.authorization("REGISTER", "sip:ims").empty());
++
++    // unusable challenge (no nonce) -> rejected
++    SipAuthChallenge bad{};
++    bad.nonce = "";
++    CHECK(!auth.beginChallenge(bad, "fallback"));
++    CHECK(!auth.hasChallenge());
++
++    // qop list without auth -> rejected
++    SipAuthChallenge noQopAuth{};
++    noQopAuth.nonce = "n1";
++    noQopAuth.qopOptions = {"auth-int"};
++    CHECK(!auth.beginChallenge(noQopAuth, "fallback"));
++
++    // usable challenge
++    SipAuthChallenge ch{};
++    ch.nonce = "dcd98b7102dd2f0e8b11d0f600bfb0c093";
++    ch.realm = "testrealm@host.com";
++    ch.qopOptions = {"auth", "auth-int"};
++    CHECK(auth.beginChallenge(ch, "unused-fallback"));
++    CHECK(auth.hasChallenge());
++
++    // header structure + nc starts at 00000001
++    std::string h1 = auth.authorization("REGISTER", "sip:reg");
++    CHECK(h1.rfind("Digest username=\"001011234567895@ims.mnc001.mcc001.3gppnetwork.org\"", 0) == 0);
++    CHECK(ExtractParam(h1, "realm") == "testrealm@host.com");
++    CHECK(ExtractParam(h1, "nonce") == "dcd98b7102dd2f0e8b11d0f600bfb0c093");
++    CHECK(h1.find("nc=00000001") != std::string::npos);
++    CHECK(h1.find("qop=auth") != std::string::npos);
++    CHECK(ExtractResponseValue(h1).size() == 32);
++
++    // response is consistent with the pure DigestResponse given the header's own parameters
++    auto cnonce = ExtractParam(h1, "cnonce");
++    auto r1 = ExtractResponseValue(h1);
++    CHECK_EQ(r1, DigestResponse("001011234567895@ims.mnc001.mcc001.3gppnetwork.org", "testrealm@host.com",
++                                "8baf473f2f8fd09487cccbd7097c6862", "dcd98b7102dd2f0e8b11d0f600bfb0c093",
++                                "00000001", cnonce, "auth", "REGISTER", "sip:reg"));
++
++    // nc increments on the next call
++    std::string h2 = auth.authorization("REGISTER", "sip:reg");
++    CHECK(h2.find("nc=00000002") != std::string::npos);
++    CHECK(ExtractResponseValue(h2) != ExtractResponseValue(h1));
++
++    // reset clears the challenge
++    auth.reset();
++    CHECK(!auth.hasChallenge());
++    CHECK(auth.authorization("REGISTER", "sip:reg").empty());
++}
++
++} // namespace
++
++int main()
++{
++    TestMd5Vectors();
++    TestPacketChecksums();
++    TestUdpDetection();
++    TestRtpPacket();
++    TestSdpMedia();
++    TestRfc3310Password();
++    TestAkaChallenge();
++    TestSipRoundTrip();
++    TestDigestResponse();
++    TestDigestAuth();
++
++    if (g_failures == 0)
++    {
++        std::printf("ims-tests: all passed\n");
++        return 0;
++    }
++    std::fprintf(stderr, "ims-tests: %d failure(s)\n", g_failures);
++    return 1;
++}
