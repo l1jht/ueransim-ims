@@ -1098,10 +1098,10 @@ index 0000000..36cf7f1
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.cpp b/src/ue/ims/ims.cpp
 new file mode 100644
-index 0000000..930d8a4
+index 0000000..ab2de99
 --- /dev/null
 +++ b/src/ue/ims/ims.cpp
-@@ -0,0 +1,880 @@
+@@ -0,0 +1,895 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -1297,6 +1297,11 @@ index 0000000..930d8a4
 +            sendResponse(msg.address, "IMS is not bound to any session", true);
 +            break;
 +        }
++        if (m_regState == ERegState::REGISTERING)
++        {
++            sendResponse(msg.address, "registration already in progress", true);
++            break;
++        }
 +        m_logger->info("IMS registration triggered by CLI");
 +        m_retryIndex = 0;
 +        m_lastError.clear();
@@ -1447,6 +1452,7 @@ index 0000000..930d8a4
 +
 +    m_regState = ERegState::REGISTERING;
 +    m_usingAuth = false;
++    m_authRetryCount = 0;
 +    m_logger->info("Sending initial REGISTER");
 +    sendRegister(false);
 +    armAttemptTimeout();
@@ -1827,8 +1833,16 @@ index 0000000..930d8a4
 +            return;
 +        if (m_usingAuth)
 +        {
-+            onRegFail("401 received on an already authenticated REGISTER");
-+            return;
++            // A 401 on an already-authenticated REGISTER usually means the nonce was
++            // consumed/expired (server-side race). Re-challenge once per flow; a second
++            // 401 is a hard credential failure.
++            if (m_authRetryCount++ >= 1)
++            {
++                onRegFail("401 after re-challenge");
++                return;
++            }
++            m_usingAuth = false;
++            m_logger->info("401 on authenticated REGISTER, re-challenging");
 +        }
 +
 +        if (!info.challenge.has_value() || !m_regAuth.beginChallenge(*info.challenge, m_base->config->ims.realm))
@@ -1879,6 +1893,7 @@ index 0000000..930d8a4
 +{
 +    m_regState = ERegState::REGISTERED;
 +    m_retryIndex = 0;
++    m_authRetryCount = 0;
 +    m_lastError.clear();
 +    m_regExpires = expires;
 +    using namespace std::chrono;
@@ -1984,10 +1999,10 @@ index 0000000..930d8a4
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.hpp b/src/ue/ims/ims.hpp
 new file mode 100644
-index 0000000..3e24f54
+index 0000000..d45f359
 --- /dev/null
 +++ b/src/ue/ims/ims.hpp
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,161 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -2063,6 +2078,7 @@ index 0000000..3e24f54
 +    std::string m_regBranch;
 +    std::string m_regTag;
 +    bool m_usingAuth{false};
++    int m_authRetryCount{0};  // 401 re-challenge attempts used within one registration flow
 +    int m_regExpires{300};
 +    std::string m_serviceRoute;
 +    uint32_t m_retryIndex{0};
@@ -3511,10 +3527,10 @@ index 0000000..a23e62f
 +add_test(NAME ims-tests COMMAND ims-tests)
 diff --git a/tests/ims_tests.cpp b/tests/ims_tests.cpp
 new file mode 100644
-index 0000000..80b0f16
+index 0000000..766e33c
 --- /dev/null
 +++ b/tests/ims_tests.cpp
-@@ -0,0 +1,430 @@
+@@ -0,0 +1,443 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -3915,6 +3931,19 @@ index 0000000..80b0f16
 +    std::string h2 = auth.authorization("REGISTER", "sip:reg");
 +    CHECK(h2.find("nc=00000002") != std::string::npos);
 +    CHECK(ExtractResponseValue(h2) != ExtractResponseValue(h1));
++
++    // Re-challenge (401 on authenticated REGISTER -> server sends a fresh nonce):
++    // beginChallenge must cleanly adopt the new challenge, reset nc, and use the new nonce.
++    SipAuthChallenge ch2{};
++    ch2.nonce = "new-nonce-2nd-challenge";
++    ch2.realm = "testrealm@host.com";
++    ch2.qopOptions = {"auth"};
++    CHECK(auth.beginChallenge(ch2, "unused-fallback"));
++    std::string h3 = auth.authorization("REGISTER", "sip:reg");
++    CHECK(ExtractParam(h3, "nonce") == "new-nonce-2nd-challenge");
++    CHECK(h3.find("nc=00000001") != std::string::npos);
++    CHECK(h3.find("qop=auth") != std::string::npos);
++    CHECK(ExtractResponseValue(h3) != ExtractResponseValue(h2));
 +
 +    // reset clears the challenge
 +    auth.reset();

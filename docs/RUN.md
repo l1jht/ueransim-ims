@@ -56,7 +56,7 @@ sudo ./nr-ue  -c config/ue.yaml
 
 ```bash
 ./nr-cli imsi-001011234567895 -e ims-status        # JSON：state/registered/expires/callState
-./nr-cli imsi-001011234567895 -e ims-register      # 手动强制重注册（正常流程自动注册，此命令用于测试/刷新）
+./nr-cli imsi-001011234567895 -e ims-register      # 手动强制重注册（正常流程自动注册，此命令用于测试/刷新；注册进行中再次触发返回 "registration already in progress"）
 ./nr-cli imsi-001011234567895 -e "ims-call sip:001011234567896@ims.mnc001.mcc001.3gppnetwork.org"
 ./nr-cli imsi-001011234567895 -e ims-answer        # autoAnswer=false 时手动应答
 ./nr-cli imsi-001011234567895 -e ims-hangup

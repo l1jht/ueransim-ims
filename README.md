@@ -6,7 +6,7 @@ SIP 包在 UERANSIM 进程内直推 NAS/GTP 数据面（`NmUeAppToNas::UPLINK_DA
 
 ## 特性
 
-- **自动 SIP 注册**：ims 会话建立即触发；**Digest-MD5 与 IMS AKA（AKAv1-MD5）双鉴权**（challenge 算法自动跟随）；退避重试 5/15/45/60s；跟随 200 OK 的 expires 并按 90% 提前重注册
+- **自动 SIP 注册**：ims 会话建立即触发；**Digest-MD5 与 IMS AKA（AKAv1-MD5）双鉴权**（challenge 算法自动跟随）；退避重试 5/15/45/60s；跟随 200 OK 的 expires 并按 90% 提前重注册；**带凭据 REGISTER 收到 401 时自动重挑战一次（每注册流程 1 次，nonce 过期/竞争兜底）**
 - **P-CSCF 双来源**：**EPCO 下发优先**（PDU 会话建立请求带 0x000C，SMF 回写 P-CSCF），`ims.pcscf` 配置兜底
 - **自动应答呼叫**：`autoAnswer`（默认 true）自动回 180/200；INVITE 带两条 Route（P-CSCF + Service-Route）与真实媒体 SDP；in-dialog 路由遵循 Record-Route
 - **RTP 媒体流（P3）**：PCMU 静音流 20ms 双向收发（rtpengine 中转），收包计数暴露于 `ims-status`；P-CSCF N5 AUDIO 组件授权
