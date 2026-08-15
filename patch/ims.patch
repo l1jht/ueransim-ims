@@ -1098,10 +1098,10 @@ index 0000000..36cf7f1
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.cpp b/src/ue/ims/ims.cpp
 new file mode 100644
-index 0000000..ab2de99
+index 0000000..6705e99
 --- /dev/null
 +++ b/src/ue/ims/ims.cpp
-@@ -0,0 +1,895 @@
+@@ -0,0 +1,915 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -1440,6 +1440,16 @@ index 0000000..ab2de99
 +            setTimer(TIMER_MEDIA_SEND, MEDIA_SEND_MS);
 +        }
 +        break;
++    case TIMER_2XX_RETRANSMIT:
++        // RFC 3261 17.2.1 Timer G: keep retransmitting the 2xx until the ACK arrives.
++        // The CALL_TIMEOUT (ANSWERING) timer bounds the retransmission window.
++        if (m_2xxRetransmitActive && m_lastReplyCode == 200 && m_callState == ECallState::ANSWERING)
++        {
++            m_logger->debug("Retransmitting 2xx [200 OK]");
++            sendCallReply(m_pendingInvite, 200, "OK", m_lastReplyBody);
++            setTimer(TIMER_2XX_RETRANSMIT, TX_RETRANSMIT_MS);
++        }
++        break;
 +    default:
 +        break;
 +    }
@@ -1690,6 +1700,7 @@ index 0000000..ab2de99
 +        m_callCallId = req.callId;
 +        m_callCSeq = req.cseq;
 +        m_lastReplyCode = 0;
++        m_2xxRetransmitActive = false;
 +        m_dialogMyTag = generateId();
 +        m_dialogPeerTag = req.fromTag;
 +        m_remoteUri = StripUriTag(req.from);
@@ -1718,6 +1729,11 @@ index 0000000..ab2de99
 +            m_lastReplyReason = "OK";
 +            m_lastReplyBody = sdp;
 +
++            // RFC 3261 17.2.1 (Timer G): retransmit the 2xx every 500ms until the ACK
++            // arrives or the call times out - a lost 2xx would otherwise strand the call.
++            m_2xxRetransmitActive = true;
++            setTimer(TIMER_2XX_RETRANSMIT, TX_RETRANSMIT_MS);
++
 +            // Media (P3): the INVITE SDP offer carries the (rtpengine) media address.
 +            std::string peerIp;
 +            int peerPort = 0;
@@ -1734,6 +1750,7 @@ index 0000000..ab2de99
 +        if (m_callState == ECallState::ANSWERING)
 +        {
 +            m_logger->info("ACK received, call confirmed");
++            m_2xxRetransmitActive = false;  // ACK acknowledges the 2xx; stop retransmitting
 +            m_callState = ECallState::CONFIRMED;
 +        }
 +    }
@@ -1782,6 +1799,9 @@ index 0000000..ab2de99
 +        m_logger->warn("Call failed [%s]", reason.c_str());
 +    stopMedia();
 +    cancelTx();
++    cancelTimer(TIMER_CALL_TIMEOUT);
++    cancelTimer(TIMER_2XX_RETRANSMIT);
++    m_2xxRetransmitActive = false;
 +    m_callState = ECallState::IDLE;
 +    m_callCallId.clear();
 +    m_remoteContact.clear();
@@ -1999,10 +2019,10 @@ index 0000000..ab2de99
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.hpp b/src/ue/ims/ims.hpp
 new file mode 100644
-index 0000000..d45f359
+index 0000000..4f479c6
 --- /dev/null
 +++ b/src/ue/ims/ims.hpp
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,163 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -2054,6 +2074,7 @@ index 0000000..d45f359
 +    static constexpr const int TIMER_TX_RETRANSMIT = 4;
 +    static constexpr const int TIMER_CALL_TIMEOUT = 5;
 +    static constexpr const int TIMER_MEDIA_SEND = 6;
++    static constexpr const int TIMER_2XX_RETRANSMIT = 7;
 +
 +    static constexpr const int REG_ATTEMPT_TIMEOUT_MS = 3000;
 +    static constexpr const int TX_RETRANSMIT_MS = 500;
@@ -2099,6 +2120,7 @@ index 0000000..d45f359
 +    int m_lastReplyCode{0};
 +    std::string m_lastReplyReason;
 +    std::string m_lastReplyBody;
++    bool m_2xxRetransmitActive{false};  // RFC 3261 17.2.1 Timer G: retransmit 2xx until ACK
 +    bool m_callUsingAuth{false};
 +    std::string m_pendingTxRequest;
 +    int m_txRetransmitCount{0};
@@ -3483,11 +3505,98 @@ index 2f80ba9..718cb6b 100644
  }
  
  void UserEquipment::pushCommand(std::unique_ptr<app::UeCliCommand> cmd, const InetAddress &address)
+diff --git a/src/utils/nts.cpp b/src/utils/nts.cpp
+index 9443338..a58a1fc 100644
+--- a/src/utils/nts.cpp
++++ b/src/utils/nts.cpp
+@@ -21,12 +21,29 @@ static std::unique_ptr<NtsMessage> TimerExpiredMessage(TimerInfo *timerInfo)
+ 
+ void TimerBase::setTimerAbsolute(int timerId, int64_t timeMs)
+ {
++    // A timer id may be (re)set before its previous entry fires; the previous
++    // entry must not fire afterwards - cancel it instead of stacking entries.
++    auto it = activeTimers.find(timerId);
++    if (it != activeTimers.end())
++        it->second->cancelled = true;
++
+     auto *timerInfo = new TimerInfo();
+     timerInfo->start = utils::CurrentTimeMillis();
+     timerInfo->end = timeMs;
+     timerInfo->timerId = timerId;
+ 
+     timerQueue.push(timerInfo);
++    activeTimers[timerId] = timerInfo;
++}
++
++void TimerBase::cancelTimer(int timerId)
++{
++    auto it = activeTimers.find(timerId);
++    if (it != activeTimers.end())
++    {
++        it->second->cancelled = true;
++        activeTimers.erase(it);
++    }
+ }
+ 
+ int64_t TimerBase::getNextWaitTime()
+@@ -40,16 +57,23 @@ int64_t TimerBase::getNextWaitTime()
+ 
+ TimerInfo *TimerBase::getAndRemoveExpiredTimer()
+ {
+-    if (timerQueue.empty())
+-        return nullptr;
+-
+-    TimerInfo *timer = timerQueue.top();
+-    if (timer->end < utils::CurrentTimeMillis())
++    while (!timerQueue.empty())
+     {
+-        timerQueue.pop();
+-        return timer;
++        TimerInfo *timer = timerQueue.top();
++        if (timer->cancelled)
++        {
++            timerQueue.pop();
++            delete timer;
++            continue;
++        }
++        if (timer->end < utils::CurrentTimeMillis())
++        {
++            timerQueue.pop();
++            activeTimers.erase(timer->timerId);
++            return timer;
++        }
++        return nullptr;
+     }
+-
+     return nullptr;
+ }
+ 
+@@ -109,6 +133,12 @@ bool NtsTask::setTimerAbsolute(int timerId, int64_t timeMs)
+     return true;
+ }
+ 
++void NtsTask::cancelTimer(int timerId)
++{
++    std::unique_lock<std::mutex> lock(mutex);
++    timerBase.cancelTimer(timerId);
++}
++
+ std::unique_ptr<NtsMessage> NtsTask::poll()
+ {
+     {
 diff --git a/src/utils/nts.hpp b/src/utils/nts.hpp
-index d363e9d..e380731 100644
+index d363e9d..f9e0538 100644
 --- a/src/utils/nts.hpp
 +++ b/src/utils/nts.hpp
-@@ -48,6 +48,7 @@ enum class NtsMessageType
+@@ -17,6 +17,7 @@
+ #include <memory>
+ #include <mutex>
+ #include <queue>
++#include <unordered_map>
+ #include <thread>
+ #include <vector>
+ 
+@@ -48,6 +49,7 @@ enum class NtsMessageType
  
      UE_APP_TO_TUN,
      UE_APP_TO_NAS,
@@ -3495,6 +3604,38 @@ index d363e9d..e380731 100644
      UE_TUN_TO_APP,
      UE_RRC_TO_NAS,
      UE_NAS_TO_RRC,
+@@ -86,6 +88,7 @@ struct TimerInfo
+     int timerId{};
+     int64_t start{};
+     int64_t end{};
++    bool cancelled{false};
+ };
+ 
+ class TimerBase
+@@ -99,12 +102,15 @@ class TimerBase
+     };
+ 
+     std::priority_queue<TimerInfo *, std::vector<TimerInfo *>, TimerInfoComparator> timerQueue{};
++    std::unordered_map<int, TimerInfo *> activeTimers{};  // latest entry per timer id
+ 
+   public:
+     ~TimerBase();
+ 
+     void setTimerAbsolute(int timerId, int64_t timeMs);
+ 
++    void cancelTimer(int timerId);
++
+     TimerInfo *getAndRemoveExpiredTimer();
+ 
+     int64_t getNextWaitTime();
+@@ -133,6 +139,7 @@ class NtsTask
+     bool pushFront(std::unique_ptr<NtsMessage> &&msg);
+     bool setTimer(int timerId, int64_t delayMs);
+     bool setTimerAbsolute(int timerId, int64_t timeMs);
++    void cancelTimer(int timerId);
+ 
+   protected:
+     std::unique_ptr<NtsMessage> poll();
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
 new file mode 100644
 index 0000000..a23e62f
