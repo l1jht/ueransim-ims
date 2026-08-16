@@ -30,22 +30,23 @@ index 0475dcb..b9a131b 100644
  
  void GtpTask::handleUdpReceive(const udp::NwUdpServerReceive &msg)
 diff --git a/src/lib/app/cli_cmd.cpp b/src/lib/app/cli_cmd.cpp
-index ca6325e..351b43c 100644
+index ca6325e..b9990da 100644
 --- a/src/lib/app/cli_cmd.cpp
 +++ b/src/lib/app/cli_cmd.cpp
-@@ -167,6 +167,11 @@ static OrderedMap<std::string, CmdEntry> g_ueCmdEntries = {
+@@ -167,6 +167,12 @@ static OrderedMap<std::string, CmdEntry> g_ueCmdEntries = {
      {"ps-release-all", {"Trigger PDU session release procedures for all active sessions", "", DefaultDesc, false}},
      {"deregister",
       {"Perform a de-registration by the UE", "<normal|disable-5g|switch-off|remove-sim>", DefaultDesc, true}},
 +    {"ims-register", {"Trigger an IMS SIP registration", "", DefaultDesc, false}},
 +    {"ims-call", {"Initiate an IMS call (INVITE)", "<uri>", DefaultDesc, true}},
++    {"ims-sms", {"Send an IMS SMS (SIP MESSAGE)", "<uri> <text>", DefaultDesc, true}},
 +    {"ims-answer", {"Answer an incoming IMS call", "", DefaultDesc, false}},
 +    {"ims-hangup", {"Hang up the current IMS call", "", DefaultDesc, false}},
 +    {"ims-status", {"Show the IMS registration/call status", "", DefaultDesc, false}},
  };
  
  static std::unique_ptr<GnbCliCommand> GnbCliParseImpl(const std::string &subCmd, const opt::OptionsResult &options,
-@@ -331,6 +336,30 @@ static std::unique_ptr<UeCliCommand> UeCliParseImpl(const std::string &subCmd, c
+@@ -331,6 +337,45 @@ static std::unique_ptr<UeCliCommand> UeCliParseImpl(const std::string &subCmd, c
      {
          return std::make_unique<UeCliCommand>(UeCliCommand::COVERAGE);
      }
@@ -59,6 +60,21 @@ index ca6325e..351b43c 100644
 +        if (options.positionalCount() != 1)
 +            CMD_ERR("An SIP URI is expected, e.g. sip:001011234567896@ims.mnc001.mcc001.3gppnetwork.org")
 +        cmd->callUri = options.getPositional(0);
++        return cmd;
++    }
++    else if (subCmd == "ims-sms")
++    {
++        auto cmd = std::make_unique<UeCliCommand>(UeCliCommand::IMS_SMS);
++        if (options.positionalCount() < 1)
++            CMD_ERR("An SIP URI is expected, e.g. sip:001011234567896@ims.mnc001.mcc001.3gppnetwork.org")
++        cmd->smsUri = options.getPositional(0);
++        // Remaining positional tokens (1..n) form the message text (spaces preserved).
++        for (std::size_t i = 1; i < options.positionalCount(); i++)
++        {
++            if (i > 1)
++                cmd->smsText += " ";
++            cmd->smsText += options.getPositional(i);
++        }
 +        return cmd;
 +    }
 +    else if (subCmd == "ims-answer")
@@ -77,27 +93,32 @@ index ca6325e..351b43c 100644
      return nullptr;
  }
 diff --git a/src/lib/app/cli_cmd.hpp b/src/lib/app/cli_cmd.hpp
-index fa29239..cff6a81 100644
+index fa29239..57fb59c 100644
 --- a/src/lib/app/cli_cmd.hpp
 +++ b/src/lib/app/cli_cmd.hpp
-@@ -56,6 +56,11 @@ struct UeCliCommand
+@@ -56,6 +56,12 @@ struct UeCliCommand
          DE_REGISTER,
          RLS_STATE,
          COVERAGE,
 +        IMS_REGISTER,
 +        IMS_CALL,
++        IMS_SMS,
 +        IMS_ANSWER,
 +        IMS_HANGUP,
 +        IMS_STATUS,
      } present;
  
      // DE_REGISTER
-@@ -70,6 +75,9 @@ struct UeCliCommand
+@@ -70,6 +76,13 @@ struct UeCliCommand
      std::optional<std::string> apn{};
      bool isEmergency{};
  
 +    // IMS_CALL
 +    std::string callUri{};
++
++    // IMS_SMS
++    std::string smsUri{};
++    std::string smsText{};
 +
      explicit UeCliCommand(PR present) : present(present)
      {
@@ -183,7 +204,7 @@ index d9e3f85..4efe6d2 100644
      if (c->supi.has_value())
          IncrementNumber(c->supi->value, ueIndex);
 diff --git a/src/ue/app/cmd_handler.cpp b/src/ue/app/cmd_handler.cpp
-index d2ed0c6..6387482 100644
+index d2ed0c6..5bd9e19 100644
 --- a/src/ue/app/cmd_handler.cpp
 +++ b/src/ue/app/cmd_handler.cpp
 @@ -9,6 +9,7 @@
@@ -221,12 +242,13 @@ index d2ed0c6..6387482 100644
      return true;
  }
  
-@@ -267,6 +274,22 @@ void UeCmdHandler::handleCmdImpl(NmUeCliCommand &msg)
+@@ -267,6 +274,23 @@ void UeCmdHandler::handleCmdImpl(NmUeCliCommand &msg)
          sendResult(msg.address, json.dumpYaml());
          break;
      }
 +    case app::UeCliCommand::IMS_REGISTER:
 +    case app::UeCliCommand::IMS_CALL:
++    case app::UeCliCommand::IMS_SMS:
 +    case app::UeCliCommand::IMS_ANSWER:
 +    case app::UeCliCommand::IMS_HANGUP:
 +    case app::UeCliCommand::IMS_STATUS: {
@@ -1098,10 +1120,10 @@ index 0000000..36cf7f1
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.cpp b/src/ue/ims/ims.cpp
 new file mode 100644
-index 0000000..6705e99
+index 0000000..5e02428
 --- /dev/null
 +++ b/src/ue/ims/ims.cpp
-@@ -0,0 +1,915 @@
+@@ -0,0 +1,1006 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -1337,6 +1359,25 @@ index 0000000..6705e99
 +        startCall(msg.cmd->callUri);
 +        sendResponse(msg.address, "IMS call initiated", false);
 +        break;
++    case app::UeCliCommand::IMS_SMS:
++        if (!m_bound)
++        {
++            sendResponse(msg.address, "IMS is not bound to any session", true);
++            break;
++        }
++        if (m_regState != ERegState::REGISTERED)
++        {
++            sendResponse(msg.address, "IMS is not registered", true);
++            break;
++        }
++        if (msg.cmd->smsUri.empty() || msg.cmd->smsText.empty())
++        {
++            sendResponse(msg.address, "Usage: ims-sms <uri> <text>", true);
++            break;
++        }
++        sendSms(msg.cmd->smsUri, msg.cmd->smsText);
++        sendResponse(msg.address, "IMS SMS sent", false);
++        break;
 +    case app::UeCliCommand::IMS_ANSWER:
 +        if (m_callState == ECallState::RINGING)
 +        {
@@ -1501,6 +1542,45 @@ index 0000000..6705e99
 +        m_logger->debug("REGISTER sent (digest) [cseq=%d]", m_cseq);
 +    else
 +        m_logger->debug("REGISTER sent [cseq=%d]", m_cseq);
++}
++
++void ImsClientTask::sendSms(const std::string &uri, const std::string &text)
++{
++    m_smsCSeq++;
++    if (m_smsCallId.empty())
++        m_smsCallId = generateId() + "@" + m_localIp;
++    std::string branch = "z9hG4bK" + generateId();
++    std::string tag = generateId();
++
++    std::string body = ims::BuildMessage(m_base->config->ims, m_localIp, uri, m_smsCSeq, m_smsCallId, branch, tag, text);
++    auto packet = ims::BuildUdpPacket(body, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
++                                      m_base->config->ims.pcscfPort);
++    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
++    m->psi = m_psi;
++    m->data = std::move(packet);
++    m_base->nasTask->push(std::move(m));
++
++    m_lastSmsResult = "sent";
++    armTxRetransmit(body);
++    m_logger->info("SMS sent to %s: %s", uri.c_str(), text.c_str());
++}
++
++void ImsClientTask::handleIncomingSms(const ims::SipRequestInfo &req)
++{
++    std::string peer = req.from.empty() ? "(unknown)" : req.from;
++    m_logger->info("SMS received from %s: %s", peer.c_str(), req.body.c_str());
++    m_smsHistory.push_back({peer, req.body});
++    if (m_smsHistory.size() > 10)
++        m_smsHistory.pop_front();
++
++    // Single transaction: acknowledge immediately (RFC 3428).
++    std::string reply = ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag, "");
++    auto packet = ims::BuildUdpPacket(reply, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
++                                      m_base->config->ims.pcscfPort);
++    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
++    m->psi = m_psi;
++    m->data = std::move(packet);
++    m_base->nasTask->push(std::move(m));
 +}
 +
 +void ImsClientTask::startCall(const std::string &uri)
@@ -1676,6 +1756,11 @@ index 0000000..6705e99
 +        return;
 +
 +    m_logger->debug("SIP request received [%s]", req.method.c_str());
++    if (req.method == "MESSAGE")
++    {
++        handleIncomingSms(req);
++        return;
++    }
 +    if (req.method == "INVITE")
 +    {
 +        if (m_callState != ECallState::IDLE)
@@ -1832,6 +1917,20 @@ index 0000000..6705e99
 +        return;
 +
 +    m_logger->debug("SIP response received [%d %s]", info.statusCode, info.reasonPhrase.c_str());
++
++    // SMS (MESSAGE) transaction: single out-of-dialog transaction; the 200 OK ends it.
++    if (!m_smsCallId.empty() && !info.callId.empty() && info.callId == m_smsCallId)
++    {
++        if (info.statusCode >= 200)
++        {
++            cancelTx();
++            m_lastSmsResult = (info.statusCode == 200)
++                                  ? "delivered (" + std::to_string(info.statusCode) + ")"
++                                  : "failed (" + std::to_string(info.statusCode) + " " + info.reasonPhrase + ")";
++            m_logger->info("SMS result: %s", m_lastSmsResult.c_str());
++        }
++        return;
++    }
 +
 +    // Dispatch to the call state machine when the response belongs to an active call dialog.
 +    if (m_callState != ECallState::IDLE && !info.callId.empty() && info.callId == m_callCallId)
@@ -2012,17 +2111,31 @@ index 0000000..6705e99
 +        {"remote", m_callState != ECallState::IDLE ? m_remoteUri : ""},
 +        {"mediaTxCount", static_cast<int64_t>(m_media.TxCount())},
 +        {"mediaRxCount", static_cast<int64_t>(m_mediaRxCount)},
++        {"smsResult", m_lastSmsResult},
++        {"smsHistory", smsHistoryText()},
 +    });
 +    return json.dumpJson();
++}
++
++std::string ImsClientTask::smsHistoryText()
++{
++    std::string out;
++    for (const auto &entry : m_smsHistory)
++    {
++        if (!out.empty())
++            out += " | ";
++        out += entry.first + ": " + entry.second;
++    }
++    return out;
 +}
 +
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.hpp b/src/ue/ims/ims.hpp
 new file mode 100644
-index 0000000..4f479c6
+index 0000000..10efd10
 --- /dev/null
 +++ b/src/ue/ims/ims.hpp
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,173 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -2034,6 +2147,8 @@ index 0000000..4f479c6
 +#pragma once
 +
 +#include <string>
++#include <deque>
++#include <utility>
 +
 +#include <ue/nts.hpp>
 +#include <ue/types.hpp>
@@ -2125,6 +2240,11 @@ index 0000000..4f479c6
 +    std::string m_pendingTxRequest;
 +    int m_txRetransmitCount{0};
 +    ims::SipRequestInfo m_pendingInvite;
++    // SMS over IMS (SIP MESSAGE, RFC 3428): single transaction, no dialog state.
++    int m_smsCSeq{0};
++    std::string m_smsCallId;
++    std::string m_lastSmsResult;
++    std::deque<std::pair<std::string, std::string>> m_smsHistory{};  // recent (peer, text) up to 10
 +
 +    // Digest challenges (registration vs call keep independent state; each is one DigestAuth).
 +    ims::DigestAuth m_regAuth;
@@ -2167,6 +2287,8 @@ index 0000000..4f479c6
 +    void sendInvite(bool withAuth);
 +    void sendAck();
 +    void sendErrorAck();
++    void sendSms(const std::string &uri, const std::string &text);
++    void handleIncomingSms(const ims::SipRequestInfo &req);
 +    void startMedia(const std::string &peerIp, int peerPort);
 +    void stopMedia();
 +    void sendBye();
@@ -2181,6 +2303,7 @@ index 0000000..4f479c6
 +    void sendResponse(const InetAddress &address, const std::string &output, bool isError);
 +    std::string generateId();
 +    std::string statusText();
++    std::string smsHistoryText();
 +    std::string regStateName() const;
 +    std::string callStateName() const;
 +};
@@ -2572,10 +2695,10 @@ index 0000000..cb16e33
 +} // namespace nr::ue
 diff --git a/src/ue/ims/sip_stack.cpp b/src/ue/ims/sip_stack.cpp
 new file mode 100644
-index 0000000..817a1d4
+index 0000000..4c956d4
 --- /dev/null
 +++ b/src/ue/ims/sip_stack.cpp
-@@ -0,0 +1,624 @@
+@@ -0,0 +1,649 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -2806,6 +2929,31 @@ index 0000000..817a1d4
 +    body += MakeHeader("Content-Length", std::to_string(sdp.size()));
 +    body += "\r\n";
 +    body += sdp;
++    return body;
++}
++
++std::string BuildMessage(const ImsConfig &config, const std::string &localIp, const std::string &remoteUri,
++                         int cseq, const std::string &callId, const std::string &branch, const std::string &tag,
++                         const std::string &text)
++{
++    std::string fromTo = config.publicIdentity;
++    if (fromTo.rfind("sip:", 0) != 0 && fromTo.rfind("sips:", 0) != 0)
++        fromTo = "sip:" + fromTo;
++
++    std::string body;
++    body += "MESSAGE " + remoteUri + " SIP/2.0\r\n";
++    body += MakeHeader("Via", "SIP/2.0/UDP " + localIp + ":" + std::to_string(config.sipPort) + ";rport;branch=" + branch);
++    body += MakeHeader("Route", "<sip:" + config.pcscf + ":" + std::to_string(config.pcscfPort) + ";lr>");
++    body += MakeHeader("Max-Forwards", "70");
++    body += MakeHeader("From", "<" + fromTo + ">;tag=" + tag);
++    body += MakeHeader("To", "<" + remoteUri + ">");
++    body += MakeHeader("Call-ID", callId);
++    body += MakeHeader("CSeq", std::to_string(cseq) + " MESSAGE");
++    body += MakeHeader("Contact", ContactHeader(config, localIp));
++    body += MakeHeader("Content-Type", "text/plain; charset=utf-8");
++    body += MakeHeader("Content-Length", std::to_string(text.size()));
++    body += "\r\n";
++    body += text;
 +    return body;
 +}
 +
@@ -3202,10 +3350,10 @@ index 0000000..817a1d4
 +} // namespace nr::ue
 diff --git a/src/ue/ims/sip_stack.hpp b/src/ue/ims/sip_stack.hpp
 new file mode 100644
-index 0000000..4ee4afc
+index 0000000..488d81c
 --- /dev/null
 +++ b/src/ue/ims/sip_stack.hpp
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,120 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -3282,6 +3430,11 @@ index 0000000..4ee4afc
 +std::string BuildInvite(const ImsConfig &config, const std::string &localIp, const std::string &remoteUri,
 +                        const std::string &serviceRoute, const std::string &callId, const std::string &branch,
 +                        const std::string &tag, const std::string &authHeader);
++
++// Builds an out-of-dialog MESSAGE request (SMS over IMS, RFC 3428): single transaction, no dialog state.
++std::string BuildMessage(const ImsConfig &config, const std::string &localIp, const std::string &remoteUri,
++                         int cseq, const std::string &callId, const std::string &branch, const std::string &tag,
++                         const std::string &text);
 +
 +// Builds an in-dialog request (ACK/BYE). routeSet is the list of Route header values.
 +std::string BuildInDialogRequest(const std::string &method, const std::string &localIp, const ImsConfig &config,

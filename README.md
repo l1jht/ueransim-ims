@@ -10,7 +10,8 @@ SIP 包在 UERANSIM 进程内直推 NAS/GTP 数据面（`NmUeAppToNas::UPLINK_DA
 - **P-CSCF 双来源**：**EPCO 下发优先**（PDU 会话建立请求带 0x000C，SMF 回写 P-CSCF），`ims.pcscf` 配置兜底
 - **自动应答呼叫**：`autoAnswer`（默认 true）自动回 180/200；INVITE 带两条 Route（P-CSCF + Service-Route）与真实媒体 SDP；in-dialog 路由遵循 Record-Route；**2xx 按 RFC 3261 Timer G 每 500ms 重传直至 ACK（弱网下 200 丢失可救回）**
 - **RTP 媒体流（P3）**：PCMU 静音流 20ms 双向收发（rtpengine 中转），收包计数暴露于 `ims-status`；P-CSCF N5 AUDIO 组件授权
-- **CLI 控制**：`ims-register`（手动强制重注册）/ `ims-call <uri>` / `ims-answer` / `ims-hangup` / `ims-status`
+- **CLI 控制**：`ims-register`（手动强制重注册）/ `ims-call <uri>` / `ims-answer` / `ims-hangup` / `ims-sms <uri> <text>` / `ims-status`
+- **SMS over IMS**：`ims-sms` 发送 SIP MESSAGE（text/plain, RFC 3428，复用请求重传）；接收自动 200 应答并打印，最近 10 条经 `ims-status` 的 `smsHistory` 可见（配合短信中心 smsc 存储+异步投递）
 - **零外部依赖**：自实现 SIP 协议栈、MD5（RFC 1321）、Digest（RFC 2617）、AKA（Milenage）、IPv4/UDP 封包（RFC 768）——无 libcurl/libxml/pjsip
 - **与既有行为兼容**：`ims.enable` 默认 false；非 SIP/RTP 流量走原 TUN 路径不变；IMS 失败不影响数据面
 - **单元测试**：`ctest` 覆盖 MD5 向量、IP/UDP 校验和（含奇数长度）、SIP 编解码回环、Digest 已知样本、AKA 挑战（hex/Base64 nonce）、RTP/SDP
