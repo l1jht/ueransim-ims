@@ -1120,10 +1120,10 @@ index 0000000..36cf7f1
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.cpp b/src/ue/ims/ims.cpp
 new file mode 100644
-index 0000000..5e02428
+index 0000000..89c3a7e
 --- /dev/null
 +++ b/src/ue/ims/ims.cpp
-@@ -0,0 +1,1006 @@
+@@ -0,0 +1,976 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -1456,12 +1456,7 @@ index 0000000..5e02428
 +        {
 +            m_txRetransmitCount--;
 +            m_logger->debug("Retransmitting SIP request [left=%d]", m_txRetransmitCount);
-+            auto packet = ims::BuildUdpPacket(m_pendingTxRequest, m_localIp, m_pcscfIp,
-+                                              m_base->config->ims.sipPort, m_base->config->ims.pcscfPort);
-+            auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
-+            m->psi = m_psi;
-+            m->data = std::move(packet);
-+            m_base->nasTask->push(std::move(m));
++            sendSipUdp(m_pendingTxRequest);
 +            if (m_txRetransmitCount > 0)
 +                setTimer(TIMER_TX_RETRANSMIT, TX_RETRANSMIT_MS);
 +        }
@@ -1553,12 +1548,7 @@ index 0000000..5e02428
 +    std::string tag = generateId();
 +
 +    std::string body = ims::BuildMessage(m_base->config->ims, m_localIp, uri, m_smsCSeq, m_smsCallId, branch, tag, text);
-+    auto packet = ims::BuildUdpPacket(body, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
-+                                      m_base->config->ims.pcscfPort);
-+    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
-+    m->psi = m_psi;
-+    m->data = std::move(packet);
-+    m_base->nasTask->push(std::move(m));
++    sendSipUdp(body);
 +
 +    m_lastSmsResult = "sent";
 +    armTxRetransmit(body);
@@ -1575,12 +1565,7 @@ index 0000000..5e02428
 +
 +    // Single transaction: acknowledge immediately (RFC 3428).
 +    std::string reply = ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag, "");
-+    auto packet = ims::BuildUdpPacket(reply, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
-+                                      m_base->config->ims.pcscfPort);
-+    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
-+    m->psi = m_psi;
-+    m->data = std::move(packet);
-+    m_base->nasTask->push(std::move(m));
++    sendSipUdp(reply);
 +}
 +
 +void ImsClientTask::startCall(const std::string &uri)
@@ -1609,12 +1594,7 @@ index 0000000..5e02428
 +    std::string body = ims::BuildInvite(m_base->config->ims, m_localIp, m_remoteUri, m_serviceRoute, m_callCallId,
 +                                        "z9hG4bK" + generateId(), m_dialogMyTag, authHeader);
 +
-+    auto packet = ims::BuildUdpPacket(body, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
-+                                      m_base->config->ims.pcscfPort);
-+    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
-+    m->psi = m_psi;
-+    m->data = std::move(packet);
-+    m_base->nasTask->push(std::move(m));
++    sendSipUdp(body);
 +
 +    armTxRetransmit(body);
 +    m_logger->debug("INVITE sent [%s]", withAuth ? "digest" : "plain");
@@ -1626,12 +1606,7 @@ index 0000000..5e02428
 +                                                 m_callRouteSet, m_callCallId, "z9hG4bK" + generateId(),
 +                                                 m_base->config->ims.publicIdentity, m_dialogMyTag, m_remoteUri,
 +                                                 m_dialogPeerTag, m_callCSeq);
-+    auto packet = ims::BuildUdpPacket(body, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
-+                                      m_base->config->ims.pcscfPort);
-+    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
-+    m->psi = m_psi;
-+    m->data = std::move(packet);
-+    m_base->nasTask->push(std::move(m));
++    sendSipUdp(body);
 +    m_logger->debug("ACK sent");
 +}
 +
@@ -1641,12 +1616,7 @@ index 0000000..5e02428
 +    // P-CSCF, no Route/Contact, matching the failed transaction.
 +    std::string body = ims::BuildErrorAck(m_base->config->ims, m_localIp, m_remoteUri, m_callCallId,
 +                                          m_dialogMyTag, m_callCSeq);
-+    auto packet = ims::BuildUdpPacket(body, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
-+                                      m_base->config->ims.pcscfPort);
-+    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
-+    m->psi = m_psi;
-+    m->data = std::move(packet);
-+    m_base->nasTask->push(std::move(m));
++    sendSipUdp(body);
 +    m_logger->debug("Error ACK sent [%d]", m_callCSeq);
 +}
 +
@@ -1657,12 +1627,7 @@ index 0000000..5e02428
 +                                                 m_callRouteSet, m_callCallId, "z9hG4bK" + generateId(),
 +                                                 m_base->config->ims.publicIdentity, m_dialogMyTag, m_remoteUri,
 +                                                 m_dialogPeerTag, m_callCSeq);
-+    auto packet = ims::BuildUdpPacket(body, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
-+                                      m_base->config->ims.pcscfPort);
-+    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
-+    m->psi = m_psi;
-+    m->data = std::move(packet);
-+    m_base->nasTask->push(std::move(m));
++    sendSipUdp(body);
 +    armTxRetransmit(body);
 +    m_logger->debug("BYE sent");
 +}
@@ -1865,16 +1830,21 @@ index 0000000..5e02428
 +    m_logger->debug("Media stopped [tx=%llu]", static_cast<unsigned long long>(m_media.TxCount()));
 +}
 +
-+void ImsClientTask::sendCallReply(const ims::SipRequestInfo &req, int code, const std::string &reason,
-+                                  const std::string &body)
++void ImsClientTask::sendSipUdp(const std::string &body)
 +{
-+    std::string reply = ims::BuildSipReply(m_base->config->ims, m_localIp, code, reason, req, m_dialogMyTag, body);
-+    auto packet = ims::BuildUdpPacket(reply, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
++    auto packet = ims::BuildUdpPacket(body, m_localIp, m_pcscfIp, m_base->config->ims.sipPort,
 +                                      m_base->config->ims.pcscfPort);
 +    auto m = std::make_unique<NmUeAppToNas>(NmUeAppToNas::UPLINK_DATA_DELIVERY);
 +    m->psi = m_psi;
 +    m->data = std::move(packet);
 +    m_base->nasTask->push(std::move(m));
++}
++
++void ImsClientTask::sendCallReply(const ims::SipRequestInfo &req, int code, const std::string &reason,
++                                  const std::string &body)
++{
++    std::string reply = ims::BuildSipReply(m_base->config->ims, m_localIp, code, reason, req, m_dialogMyTag, body);
++    sendSipUdp(reply);
 +    m_logger->debug("SIP reply sent [%d %s]", code, reason.c_str());
 +}
 +
@@ -2132,10 +2102,10 @@ index 0000000..5e02428
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.hpp b/src/ue/ims/ims.hpp
 new file mode 100644
-index 0000000..10efd10
+index 0000000..79ff672
 --- /dev/null
 +++ b/src/ue/ims/ims.hpp
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,174 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -2301,6 +2271,7 @@ index 0000000..10efd10
 +    void cancelTx();
 +
 +    void sendResponse(const InetAddress &address, const std::string &output, bool isError);
++    void sendSipUdp(const std::string &body);
 +    std::string generateId();
 +    std::string statusText();
 +    std::string smsHistoryText();
@@ -2695,10 +2666,10 @@ index 0000000..cb16e33
 +} // namespace nr::ue
 diff --git a/src/ue/ims/sip_stack.cpp b/src/ue/ims/sip_stack.cpp
 new file mode 100644
-index 0000000..4c956d4
+index 0000000..26c030a
 --- /dev/null
 +++ b/src/ue/ims/sip_stack.cpp
-@@ -0,0 +1,649 @@
+@@ -0,0 +1,587 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -2807,6 +2778,52 @@ index 0000000..4c956d4
 +    std::string tag = header.substr(tagPos + 5);
 +    tag = Trim(tag);
 +    return tag;
++}
++
++// Scans SIP headers (with folding) invoking process(name, value) per header and
++// collecting the message body after the blank line.
++template <typename F>
++void ScanSipHeaders(std::istringstream &stream, F process, std::string &body)
++{
++    std::string line;
++    std::string headerName;
++    std::string headerValue;
++    bool inBody = false;
++    while (std::getline(stream, line))
++    {
++        if (inBody)
++        {
++            body += line + "\n";
++            continue;
++        }
++        if (line == "\r" || line.empty())
++        {
++            if (!headerName.empty())
++                process(headerName, headerValue);
++            headerName.clear();
++            headerValue.clear();
++            inBody = true;
++            continue;
++        }
++        if (!line.empty() && (line[0] == ' ' || line[0] == '\t') && !headerName.empty())
++        {
++            headerValue += " " + Trim(line);
++            continue;
++        }
++        if (!headerName.empty())
++            process(headerName, headerValue);
++        headerName.clear();
++        headerValue.clear();
++
++        auto colon = line.find(':');
++        if (colon != std::string::npos)
++        {
++            headerName = Trim(line.substr(0, colon));
++            headerValue = Trim(line.substr(colon + 1));
++        }
++    }
++    if (!headerName.empty() && !inBody)
++        process(headerName, headerValue);
 +}
 +
 +// The user part of the identity, used in Contact (the identity's domain must not be repeated).
@@ -3063,9 +3080,8 @@ index 0000000..4c956d4
 +
 +std::string PlaceholderSdp(const std::string &localIp)
 +{
-+    // A valid single-audio-line SDP the rtpengine can rewrite. Media is not actually sent in P2 (signaling only),
-+    // but the offer must be structurally acceptable (m=audio 0 was rejected by rtpengine/pjsua with 488).
-+    return "v=0\r\no=- 0 0 IN IP4 " + localIp + "\r\ns=-\r\nc=IN IP4 " + localIp + "\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
++    // P2 kept a fixed port so rtpengine would accept the offer; P3 makes it configurable.
++    return BuildMediaSdp(localIp, 49170);
 +}
 +
 +std::string BuildMediaSdp(const std::string &localIp, int mediaPort)
@@ -3162,84 +3178,14 @@ index 0000000..4c956d4
 +                info.cseq = std::atoi(cseq.c_str());
 +        }
 +    };
-+
-+    std::string headerName;
-+    std::string headerValue;
 +    std::string body;
-+    bool inBody = false;
-+    while (std::getline(stream, line))
-+    {
-+        if (inBody)
-+        {
-+            body += line + "\n";
-+            continue;
-+        }
-+        if (line == "\r" || line.empty())
-+        {
-+            inBody = true;
-+            continue;
-+        }
-+        if (!line.empty() && (line[0] == ' ' || line[0] == '\t') && !headerName.empty())
-+        {
-+            headerValue += " " + Trim(line);
-+            continue;
-+        }
-+        if (!headerName.empty())
-+            processHeader(headerName, headerValue);
-+        headerName.clear();
-+        headerValue.clear();
++    ScanSipHeaders(stream, processHeader, body);
 +
-+        auto colon = line.find(':');
-+        if (colon != std::string::npos)
-+        {
-+            headerName = Trim(line.substr(0, colon));
-+            headerValue = Trim(line.substr(colon + 1));
-+        }
-+    }
-+    if (!headerName.empty())
-+        processHeader(headerName, headerValue);
 +    while (!body.empty() && body.back() == '\n')
 +        body.pop_back();
 +    info.body = body;
 +
 +    return info;
-+}
-+
-+std::vector<std::string> ExtractRoutes(const std::string &text)
-+{
-+    std::vector<std::string> routes;
-+    std::istringstream stream(text);
-+    std::string line;
-+    while (std::getline(stream, line))
-+    {
-+        auto colon = line.find(':');
-+        if (colon == std::string::npos)
-+            continue;
-+        std::string name = ToLower(Trim(line.substr(0, colon)));
-+        if (name != "route")
-+            continue;
-+        std::string value = Trim(line.substr(colon + 1));
-+        // Multiple Route headers may be comma-separated as well; split on ">,<".
-+        std::string token;
-+        for (char c : value)
-+        {
-+            if (c == ',')
-+            {
-+                if (!token.empty())
-+                {
-+                    routes.push_back(Trim(token));
-+                    token.clear();
-+                }
-+            }
-+            else
-+            {
-+                token.push_back(c);
-+            }
-+        }
-+        if (!token.empty())
-+            routes.push_back(Trim(token));
-+    }
-+    return routes;
 +}
 +
 +SipRequestInfo ParseSipRequest(const std::string &text)
@@ -3258,10 +3204,7 @@ index 0000000..4c956d4
 +    info.method = line.substr(0, space1);
 +    info.requestUri = line.substr(space1 + 1, space2 - space1 - 1);
 +
-+    std::string headerName;
-+    std::string headerValue;
 +    std::string body;
-+    bool inBody = false;
 +    auto process = [&info](const std::string &name, const std::string &value)
 +    {
 +        std::string lname = ToLower(name);
@@ -3302,41 +3245,7 @@ index 0000000..4c956d4
 +        else if (lname == "record-route")
 +            info.recordRoutes.push_back(Trim(value));
 +    };
-+    while (std::getline(stream, line))
-+    {
-+        if (inBody)
-+        {
-+            body += line + "\n";
-+            continue;
-+        }
-+        if (line == "\r" || line.empty())
-+        {
-+            if (!headerName.empty())
-+                process(headerName, headerValue);
-+            headerName.clear();
-+            headerValue.clear();
-+            inBody = true;
-+            continue;
-+        }
-+        if (!line.empty() && (line[0] == ' ' || line[0] == '\t') && !headerName.empty())
-+        {
-+            headerValue += " " + Trim(line);
-+            continue;
-+        }
-+        if (!headerName.empty())
-+            process(headerName, headerValue);
-+        headerName.clear();
-+        headerValue.clear();
-+
-+        auto colon = line.find(':');
-+        if (colon != std::string::npos)
-+        {
-+            headerName = Trim(line.substr(0, colon));
-+            headerValue = Trim(line.substr(colon + 1));
-+        }
-+    }
-+    if (!headerName.empty() && !inBody)
-+        process(headerName, headerValue);
++    ScanSipHeaders(stream, process, body);
 +
 +    // Normalize the body: strip the trailing \n -> we join with \n above.
 +    while (!body.empty() && body.back() == '\n')
@@ -3350,10 +3259,10 @@ index 0000000..4c956d4
 +} // namespace nr::ue
 diff --git a/src/ue/ims/sip_stack.hpp b/src/ue/ims/sip_stack.hpp
 new file mode 100644
-index 0000000..488d81c
+index 0000000..09e623f
 --- /dev/null
 +++ b/src/ue/ims/sip_stack.hpp
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,117 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -3468,9 +3377,6 @@ index 0000000..488d81c
 +// Parses the c= (connection address) and m= (media port) of an SDP answer/offer.
 +// Returns true and fills out the media address when both are present.
 +bool ParseSdpMedia(const std::string &sdp, std::string &outAddress, int &outPort);
-+
-+// Extracts the Route header values from a SIP message text.
-+std::vector<std::string> ExtractRoutes(const std::string &text);
 +
 +} // namespace ims
 +} // namespace nr::ue
