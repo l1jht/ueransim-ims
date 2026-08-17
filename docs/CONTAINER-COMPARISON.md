@@ -44,7 +44,7 @@ IMS 域用户侧最初依赖**外部 pjsua 进程**绑定 UE 的 ims TUN 接口�
 
 - **P1 注册**：S-CSCF usrloc 3 IMPU registered、P-CSCF N5 201（app-session）、`ims-status` REGISTERED、到期重注册稳定
 - **P2 呼叫**：`ims-call` → INVITE（两条 Route + digest）→ 200 → ACK → CONFIRMED → `ims-hangup` → BYE → 200；被叫自动应答（180/200，回带 Record-Route）正常
-- **双向互呼**：`scripts/ims-verify.sh` 23 项断言全绿（正/反向 CONFIRMED + 挂断 IDLE + 媒体 + AKA/EPCO + 核心网断言 + 数据面回归）
+- **双向互呼**：23 项回归断言全绿（正/反向 CONFIRMED + 挂断 IDLE + 媒体 + AKA/EPCO + 核心网断言 + 数据面回归）
 - **双客户端互呼**：双 UERANSIM IMS 客户端 10 轮稳定性 10/10（对比：pjsua 对照组同测试因续注册写死 expires-30、忙时掉注册而失败——对照组固有局限）
 - **P3 媒体**：RTP 静音流双向收发（rtpengine 中转）+ P-CSCF N5 AUDIO 组件 201
 - **P4 增强**：EPCO 下发 P-CSCF（0x000C）+ IMS AKA（AKAv1-MD5）注册，S-CSCF `Auth succeeded`

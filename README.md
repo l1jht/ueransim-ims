@@ -76,9 +76,10 @@ sudo ./nr-ue -c <path-to>/config/ue.yaml
 
 - ✅ P1 注册：S-CSCF usrloc（3 IMPU）、P-CSCF N5 201、`ims-status` REGISTERED、重注册稳定
 - ✅ P2 呼叫：INVITE → 200 → ACK → CONFIRMED → BYE，主叫与被叫自动应答均验证（in-dialog 路由遵循 Record-Route）
-- ✅ 双向互呼：正/反向全通（`scripts/ims-verify.sh` 23 项断言全绿）；双 UERANSIM IMS 客户端互呼 10/10 稳定性（早前"外部客户端经 I-CSCF 偶发 500"经查为被叫注册过期表象，注册稳定后不复现）
+- ✅ 双向互呼：正/反向全通（注册/CLI 防护/SMS/双向呼叫/媒体/EPCO 共 23 项回归断言全绿）；双 UERANSIM IMS 客户端互呼 10/10 稳定性（早前"外部客户端经 I-CSCF 偶发 500"经查为被叫注册过期表象，注册稳定后不复现）
 - ✅ P3 媒体：RTP 静音流双向收发（rtpengine 中转）+ P-CSCF N5 AUDIO 组件 201
 - ✅ P4 增强：EPCO 下发 P-CSCF（0x000C，EPCO 优先/配置兜底）+ IMS AKA（AKAv1-MD5，S-CSCF `ALGORITHM IS [AKAv1-MD5]` + `Auth succeeded`）
+- ✅ P5 SMS over IMS：`ims-sms` 双向互发（SIP MESSAGE，短信中心存储+异步投递），多批次/中文 UTF-8/弱网 25% 丢包无重复投递均验证（2026-08-16/17）
 
 ## 许可
 

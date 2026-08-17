@@ -72,7 +72,7 @@ sudo ./nr-ue  -c config/ue.yaml
 | 被叫 | 收到 INVITE 自动 180→200（autoAnswer，回带 Record-Route）；主叫收到 ACK（ACK 需带 200 OK 的 Record-Route Route 集，否则被叫侧 ACK 超时） |
 | 挂断 | BYE 双向；S-CSCF dialog 清理；N5 会话删除 |
 | 媒体（P3） | 双端 `ims-status` mediaRxCount>0；P-CSCF N5 body 出现 `medType: "AUDIO"` + qosReference（201）；5QI=1 QoS 流为探测项 |
-| 双向互呼 | 正/反向各一轮：双向 CONFIRMED + 挂断 IDLE（`scripts/ims-verify.sh` 23 项断言（含 AKA/EPCO/媒体）；反向触发依赖对端形态：pjsua 控制台或容器内 `nr-cli`） |
+| 双向互呼 | 正/反向各一轮：双向 CONFIRMED + 挂断 IDLE（23 项回归断言含注册/CLI 防护/SMS/媒体/EPCO；反向触发依赖对端形态：pjsua 控制台或容器内 `nr-cli`） |
 | 稳定性 | 到期 90% 提前重注册成功；连续呼叫无 477/403/504（注意 usrloc "slot 477" 日志误报） |
 | 数据面隔离 | `ims.pcscf` 故意配错时，TUN ping 不受影响，IMS 仅日志退避重试 |
 
