@@ -1120,10 +1120,10 @@ index 0000000..36cf7f1
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.cpp b/src/ue/ims/ims.cpp
 new file mode 100644
-index 0000000..89c3a7e
+index 0000000..51496a7
 --- /dev/null
 +++ b/src/ue/ims/ims.cpp
-@@ -0,0 +1,976 @@
+@@ -0,0 +1,983 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -1452,12 +1452,14 @@ index 0000000..89c3a7e
 +        }
 +        break;
 +    case TIMER_TX_RETRANSMIT:
-+        if (m_txRetransmitCount > 0 && !m_pendingTxRequest.empty())
++        if (!m_txTable.empty())
 +        {
-+            m_txRetransmitCount--;
-+            m_logger->debug("Retransmitting SIP request [left=%d]", m_txRetransmitCount);
-+            sendSipUdp(m_pendingTxRequest);
-+            if (m_txRetransmitCount > 0)
++            auto bodies = m_txTable.tick();
++            m_logger->debug("Retransmitting SIP request(s) [count=%zu, table=%zu]", bodies.size(),
++                            m_txTable.size());
++            for (const auto &b : bodies)
++                sendSipUdp(b);
++            if (!m_txTable.empty())
 +                setTimer(TIMER_TX_RETRANSMIT, TX_RETRANSMIT_MS);
 +        }
 +        break;
@@ -1551,7 +1553,7 @@ index 0000000..89c3a7e
 +    sendSipUdp(body);
 +
 +    m_lastSmsResult = "sent";
-+    armTxRetransmit(body);
++    armTx(m_smsCallId, m_smsCSeq, body);
 +    m_logger->info("SMS sent to %s: %s", uri.c_str(), text.c_str());
 +}
 +
@@ -1596,7 +1598,7 @@ index 0000000..89c3a7e
 +
 +    sendSipUdp(body);
 +
-+    armTxRetransmit(body);
++    armTx(m_callCallId, m_callCSeq, body);
 +    m_logger->debug("INVITE sent [%s]", withAuth ? "digest" : "plain");
 +}
 +
@@ -1628,7 +1630,7 @@ index 0000000..89c3a7e
 +                                                 m_base->config->ims.publicIdentity, m_dialogMyTag, m_remoteUri,
 +                                                 m_dialogPeerTag, m_callCSeq);
 +    sendSipUdp(body);
-+    armTxRetransmit(body);
++    armTx(m_callCallId, m_callCSeq, body);
 +    m_logger->debug("BYE sent");
 +}
 +
@@ -1669,7 +1671,6 @@ index 0000000..89c3a7e
 +            }
 +            m_callUsingAuth = true;
 +            m_logger->info("Received 401 challenge, sending authenticated INVITE");
-+            cancelTx();
 +            sendInvite(true);
 +            return;
 +        }
@@ -1680,7 +1681,6 @@ index 0000000..89c3a7e
 +            // In-dialog requests from the caller follow the Record-Route set (forward order,
 +            // starting with its own P-CSCF); Service-Route lacks the dialog id used by the S-CSCF.
 +            m_callRouteSet = JoinRouteSet(info.recordRoutes, false);
-+            cancelTx();
 +            setTimer(TIMER_CALL_TIMEOUT, 0);
 +            m_logger->info("Call established (200 OK), sending ACK");
 +            sendAck();
@@ -1853,7 +1853,8 @@ index 0000000..89c3a7e
 +    if (!reason.empty())
 +        m_logger->warn("Call failed [%s]", reason.c_str());
 +    stopMedia();
-+    cancelTx();
++    m_txTable.cancelAll();
++    cancelTimer(TIMER_TX_RETRANSMIT);
 +    cancelTimer(TIMER_CALL_TIMEOUT);
 +    cancelTimer(TIMER_2XX_RETRANSMIT);
 +    m_2xxRetransmitActive = false;
@@ -1867,17 +1868,14 @@ index 0000000..89c3a7e
 +    m_pendingInvite = ims::SipRequestInfo{};
 +}
 +
-+void ImsClientTask::armTxRetransmit(const std::string &requestBody)
++void ImsClientTask::armTx(const std::string &callId, int cseq, const std::string &body)
 +{
-+    m_pendingTxRequest = requestBody;
-+    m_txRetransmitCount = TX_MAX_RETRANSMIT;
-+    setTimer(TIMER_TX_RETRANSMIT, TX_RETRANSMIT_MS);
-+}
-+
-+void ImsClientTask::cancelTx()
-+{
-+    m_pendingTxRequest.clear();
-+    m_txRetransmitCount = 0;
++    bool wasEmpty = m_txTable.empty();
++    auto res = m_txTable.arm(callId, cseq, body);
++    if (res == ims::EArmResult::ADDED_WITH_EVICTION)
++        m_logger->warn("Transaction table full, evicting oldest entry");
++    if (wasEmpty)
++        setTimer(TIMER_TX_RETRANSMIT, TX_RETRANSMIT_MS);
 +}
 +
 +void ImsClientTask::handleSipResponse(const std::string &text)
@@ -1888,12 +1886,21 @@ index 0000000..89c3a7e
 +
 +    m_logger->debug("SIP response received [%d %s]", info.statusCode, info.reasonPhrase.c_str());
 +
++    // A final response ends its client transaction: stop retransmitting that request only.
++    // (1xx provisionals deliberately do not cancel, preserving prior behavior.)
++    if (info.statusCode >= 200)
++        m_txTable.cancel(info.callId, info.cseq);
++
 +    // SMS (MESSAGE) transaction: single out-of-dialog transaction; the 200 OK ends it.
 +    if (!m_smsCallId.empty() && !info.callId.empty() && info.callId == m_smsCallId)
 +    {
++        if (info.cseq != m_smsCSeq)
++        {
++            m_logger->debug("Ignoring stale SMS response [cseq=%d, current=%d]", info.cseq, m_smsCSeq);
++            return;
++        }
 +        if (info.statusCode >= 200)
 +        {
-+            cancelTx();
 +            m_lastSmsResult = (info.statusCode == 200)
 +                                  ? "delivered (" + std::to_string(info.statusCode) + ")"
 +                                  : "failed (" + std::to_string(info.statusCode) + " " + info.reasonPhrase + ")";
@@ -2102,10 +2109,10 @@ index 0000000..89c3a7e
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.hpp b/src/ue/ims/ims.hpp
 new file mode 100644
-index 0000000..79ff672
+index 0000000..62b68b9
 --- /dev/null
 +++ b/src/ue/ims/ims.hpp
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,172 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -2128,6 +2135,7 @@ index 0000000..79ff672
 +#include "auth.hpp"
 +#include "media.hpp"
 +#include "sip_stack.hpp"
++#include "transaction.hpp"
 +
 +namespace nr::ue
 +{
@@ -2163,7 +2171,6 @@ index 0000000..79ff672
 +
 +    static constexpr const int REG_ATTEMPT_TIMEOUT_MS = 3000;
 +    static constexpr const int TX_RETRANSMIT_MS = 500;
-+    static constexpr const int TX_MAX_RETRANSMIT = 4;
 +    static constexpr const int CALL_TIMEOUT_MS = 15000;
 +    static constexpr const int MEDIA_SEND_MS = 20;
 +
@@ -2207,8 +2214,7 @@ index 0000000..79ff672
 +    std::string m_lastReplyBody;
 +    bool m_2xxRetransmitActive{false};  // RFC 3261 17.2.1 Timer G: retransmit 2xx until ACK
 +    bool m_callUsingAuth{false};
-+    std::string m_pendingTxRequest;
-+    int m_txRetransmitCount{0};
++    ims::SipTransactionTable m_txTable;
 +    ims::SipRequestInfo m_pendingInvite;
 +    // SMS over IMS (SIP MESSAGE, RFC 3428): single transaction, no dialog state.
 +    int m_smsCSeq{0};
@@ -2267,8 +2273,7 @@ index 0000000..79ff672
 +    void handleCallRequest(const ims::SipRequestInfo &req);
 +    void sendCallReply(const ims::SipRequestInfo &req, int code, const std::string &reason, const std::string &body);
 +    void callFail(const std::string &reason);
-+    void armTxRetransmit(const std::string &requestBody);
-+    void cancelTx();
++    void armTx(const std::string &callId, int cseq, const std::string &body);
 +
 +    void sendResponse(const InetAddress &address, const std::string &output, bool isError);
 +    void sendSipUdp(const std::string &body);
@@ -3380,6 +3385,165 @@ index 0000000..09e623f
 +
 +} // namespace ims
 +} // namespace nr::ue
+diff --git a/src/ue/ims/transaction.cpp b/src/ue/ims/transaction.cpp
+new file mode 100644
+index 0000000..6981050
+--- /dev/null
++++ b/src/ue/ims/transaction.cpp
+@@ -0,0 +1,90 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#include "transaction.hpp"
++
++namespace nr::ue
++{
++namespace ims
++{
++
++EArmResult SipTransactionTable::arm(const std::string &callId, int cseq, const std::string &body)
++{
++    for (auto &e : m_entries)
++    {
++        if (e.callId == callId && e.cseq == cseq)
++        {
++            e.body = body;
++            e.retransmitsLeft = MAX_RETRANSMITS;
++            return EArmResult::REPLACED;
++        }
++    }
++
++    bool evicted = false;
++    if (m_entries.size() >= CAPACITY)
++    {
++        m_entries.erase(m_entries.begin());
++        evicted = true;
++    }
++    m_entries.push_back({callId, cseq, body, MAX_RETRANSMITS});
++    return evicted ? EArmResult::ADDED_WITH_EVICTION : EArmResult::ADDED;
++}
++
++bool SipTransactionTable::cancel(const std::string &callId, int cseq)
++{
++    for (auto it = m_entries.begin(); it != m_entries.end(); ++it)
++    {
++        if (it->callId == callId && it->cseq == cseq)
++        {
++            m_entries.erase(it);
++            return true;
++        }
++    }
++    return false;
++}
++
++void SipTransactionTable::cancelAll()
++{
++    m_entries.clear();
++}
++
++std::vector<std::string> SipTransactionTable::tick()
++{
++    std::vector<std::string> out;
++    for (auto it = m_entries.begin(); it != m_entries.end();)
++    {
++        out.push_back(it->body);
++        it->retransmitsLeft--;
++        if (it->retransmitsLeft <= 0)
++            it = m_entries.erase(it);
++        else
++            ++it;
++    }
++    return out;
++}
++
++bool SipTransactionTable::contains(const std::string &callId, int cseq) const
++{
++    for (const auto &e : m_entries)
++        if (e.callId == callId && e.cseq == cseq)
++            return true;
++    return false;
++}
++
++bool SipTransactionTable::empty() const
++{
++    return m_entries.empty();
++}
++
++std::size_t SipTransactionTable::size() const
++{
++    return m_entries.size();
++}
++
++} // namespace ims
++} // namespace nr::ue
+diff --git a/src/ue/ims/transaction.hpp b/src/ue/ims/transaction.hpp
+new file mode 100644
+index 0000000..f570f20
+--- /dev/null
++++ b/src/ue/ims/transaction.hpp
+@@ -0,0 +1,57 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#pragma once
++
++#include <cstddef>
++#include <string>
++#include <vector>
++
++namespace nr::ue
++{
++namespace ims
++{
++
++struct SipTransaction
++{
++    std::string callId;
++    int cseq{0};
++    std::string body;
++    int retransmitsLeft{0};
++};
++
++enum class EArmResult
++{
++    ADDED,
++    REPLACED,
++    ADDED_WITH_EVICTION,
++};
++
++// Retransmission lifecycle of pending SIP client transactions (INVITE/BYE/MESSAGE),
++// keyed by Call-ID + CSeq. Pure logic: tick() returns the bodies to send, the caller
++// owns transport and the 500 ms cadence.
++class SipTransactionTable
++{
++  public:
++    static constexpr const int MAX_RETRANSMITS = 4;
++    static constexpr const std::size_t CAPACITY = 8;
++
++    EArmResult arm(const std::string &callId, int cseq, const std::string &body);
++    bool cancel(const std::string &callId, int cseq);
++    void cancelAll();
++    std::vector<std::string> tick();
++    bool contains(const std::string &callId, int cseq) const;
++    bool empty() const;
++    std::size_t size() const;
++
++  private:
++    std::vector<SipTransaction> m_entries{};
++};
++
++} // namespace ims
++} // namespace nr::ue
 diff --git a/src/ue/nas/sm/establishment.cpp b/src/ue/nas/sm/establishment.cpp
 index 4623a14..0134a85 100644
 --- a/src/ue/nas/sm/establishment.cpp
@@ -3697,10 +3861,10 @@ index d363e9d..f9e0538 100644
      std::unique_ptr<NtsMessage> poll();
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
 new file mode 100644
-index 0000000..a23e62f
+index 0000000..869a3a9
 --- /dev/null
 +++ b/tests/CMakeLists.txt
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,25 @@
 +enable_testing()
 +
 +add_executable(ims-tests
@@ -3709,6 +3873,7 @@ index 0000000..a23e62f
 +  ../src/ue/ims/digest.cpp
 +  ../src/ue/ims/packet.cpp
 +  ../src/ue/ims/sip_stack.cpp
++  ../src/ue/ims/transaction.cpp
 +  ../src/lib/crypt/milenage.cpp
 +  ../src/lib/crypt/mac.cpp
 +  ../src/ext/crypt-ext/aes.c
@@ -3727,10 +3892,10 @@ index 0000000..a23e62f
 +add_test(NAME ims-tests COMMAND ims-tests)
 diff --git a/tests/ims_tests.cpp b/tests/ims_tests.cpp
 new file mode 100644
-index 0000000..766e33c
+index 0000000..7bd2927
 --- /dev/null
 +++ b/tests/ims_tests.cpp
-@@ -0,0 +1,443 @@
+@@ -0,0 +1,533 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -3742,6 +3907,7 @@ index 0000000..766e33c
 +// Plain-assert unit tests for the self-contained IMS pure functions
 +// (digest, packet transport, SIP codec). No external test framework.
 +
++#include <algorithm>
 +#include <cstdio>
 +#include <cstring>
 +#include <string>
@@ -3751,6 +3917,7 @@ index 0000000..766e33c
 +#include "digest.hpp"
 +#include "packet.hpp"
 +#include "sip_stack.hpp"
++#include "transaction.hpp"
 +
 +using namespace nr::ue;
 +using namespace nr::ue::ims;
@@ -4153,6 +4320,93 @@ index 0000000..766e33c
 +
 +} // namespace
 +
++void TestTransactionTable()
++{
++    using ims::SipTransactionTable;
++
++    // 1) arm -> tick retransmits 4 times at the caller's cadence, then the entry expires.
++    {
++        SipTransactionTable t;
++        CHECK_EQ((int)t.arm("call@a", 1, "INVITE-1"), (int)ims::EArmResult::ADDED);
++        for (int i = 0; i < 4; i++)
++        {
++            auto out = t.tick();
++            CHECK_EQ(out.size(), (size_t)1);
++            CHECK_EQ(out[0], std::string("INVITE-1"));
++        }
++        CHECK(t.tick().empty());
++        CHECK(t.empty());
++    }
++
++    // 2) cancel removes exactly the matching (Call-ID, CSeq) entry, sparing the rest.
++    {
++        SipTransactionTable t;
++        t.arm("call@a", 1, "INVITE-1");
++        t.arm("call@a", 2, "BYE-2");
++        t.arm("sms@a", 5, "MSG-5");
++        CHECK(t.cancel("call@a", 1));
++        CHECK(!t.contains("call@a", 1));
++        CHECK(t.contains("call@a", 2));
++        CHECK(t.contains("sms@a", 5));
++        CHECK(!t.cancel("call@a", 99));
++        CHECK_EQ(t.size(), (size_t)2);
++    }
++
++    // 3) cancelAll clears everything.
++    {
++        SipTransactionTable t;
++        t.arm("a", 1, "x");
++        t.arm("b", 1, "y");
++        t.cancelAll();
++        CHECK(t.empty());
++        CHECK(t.tick().empty());
++    }
++
++    // 4) capacity 8: the 9th arm evicts the oldest entry.
++    {
++        SipTransactionTable t;
++        for (int i = 0; i < 8; i++)
++            CHECK_EQ((int)t.arm("call", i, "body-" + std::to_string(i)), (int)ims::EArmResult::ADDED);
++        CHECK_EQ((int)t.arm("call", 8, "body-8"), (int)ims::EArmResult::ADDED_WITH_EVICTION);
++        CHECK_EQ(t.size(), SipTransactionTable::CAPACITY);
++        CHECK(!t.contains("call", 0));
++        CHECK(t.contains("call", 1));
++        CHECK(t.contains("call", 8));
++    }
++
++    // 5) re-arming the same key replaces (no duplicate entries, counter reset).
++    {
++        SipTransactionTable t;
++        t.arm("call@a", 1, "plain");
++        CHECK_EQ((int)t.arm("call@a", 1, "auth"), (int)ims::EArmResult::REPLACED);
++        CHECK_EQ(t.size(), (size_t)1);
++        auto out = t.tick();
++        CHECK_EQ(out.size(), (size_t)1);
++        CHECK_EQ(out[0], std::string("auth"));
++    }
++
++    // 6) tick on an empty table is a no-op.
++    {
++        SipTransactionTable t;
++        CHECK(t.tick().empty());
++        CHECK(t.empty());
++    }
++
++    // 7) Regression for the single-slot defect: INVITE and SMS armed together must BOTH
++    //    be retransmitted on tick (the old single slot let the second arm overwrite the first).
++    {
++        SipTransactionTable t;
++        t.arm("call@a", 1, "INVITE-1");
++        t.arm("sms@a", 3, "MSG-3");
++        auto out = t.tick();
++        CHECK_EQ(out.size(), (size_t)2);
++        CHECK(std::find(out.begin(), out.end(), std::string("INVITE-1")) != out.end());
++        CHECK(std::find(out.begin(), out.end(), std::string("MSG-3")) != out.end());
++        CHECK(t.contains("call@a", 1));
++        CHECK(t.contains("sms@a", 3));
++    }
++}
++
 +int main()
 +{
 +    TestMd5Vectors();
@@ -4165,6 +4419,7 @@ index 0000000..766e33c
 +    TestSipRoundTrip();
 +    TestDigestResponse();
 +    TestDigestAuth();
++    TestTransactionTable();
 +
 +    if (g_failures == 0)
 +    {

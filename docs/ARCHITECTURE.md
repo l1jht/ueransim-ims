@@ -21,6 +21,9 @@ src/ue/ims/
 ├── auth.cpp/hpp       DigestAuth（有状态挑战对象）
 │                       ├── beginChallenge（校验 nonce 与 qop 列表含 auth，重置 nc/生成 cnonce）
 │                       └── authorization(method, uri) → 完整 Authorization 头值
+├── transaction.cpp/hpp SipTransactionTable（纯逻辑事务表，键 = Call-ID+CSeq）
+│                       ├── arm/cancel/cancelAll/tick（tick 返回本轮应重发的 body 列表）
+│                       └── 容量 8 满淘汰最旧；每事务独立 4 次重传计数
 ├── digest.cpp/hpp     MD5（RFC 1321）+ DigestResponse（RFC 2617）纯函数库
 └── config.hpp         ImsConfig（ue.yaml `ims:` 段，含 enable 开关）
 ```
@@ -30,6 +33,7 @@ src/ue/ims/
 - **纯函数与有状态分离**：digest（纯）→ auth（有状态）→ sip_stack（纯文本）→ packet（字节层）→ ims（编排）。越靠下越可单测、可复用
 - **校验和独立成模块**：IPv4/UDP 封包在 `packet` 内自含，测试按 RFC 768 参考逐字节验证——历史上奇数长度 payload 校验和 bug 即藏于此
 - **鉴权状态每路独立**：注册机与呼叫机各持一个 `DigestAuth`，互不串扰（旧实现曾共享 cnonce）
+- **重传事务表化**（2026-08-17）：INVITE/BYE/MESSAGE 的重传生命周期由 `SipTransactionTable` 按 Call-ID+CSeq 键控，单一 500ms 扫描定时器驱动。**修复两个缺陷**：① 旧单槽位 `m_pendingTxRequest` 被后发事务覆盖（INVITE 重传窗口内发 SMS 会丢 INVITE 重传）；② SMS 响应只按 Call-ID 匹配（所有 SMS 复用同一 Call-ID），迟到的旧响应会 cancelTx 杀掉其他事务的重传。现：最终响应（≥200，单谓词）只取消自身事务；SMS 分支补 CSeq 校验，错配迟到响应 debug 日志后丢弃。注册不入表（保持 TIMER_REG_TIMEOUT 机制）；1xx 不取消重传（保持原行为，合规化留作单谓词处的后续选项）
 
 ## 信令流程
 
