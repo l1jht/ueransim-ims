@@ -86,4 +86,3 @@ ims:
   expires: 300          # request expires (the 200 OK value wins; re-register at 90%)
   mediaPort: 50002      # local RTP media port (P3, offset per UE)
   autoAnswer: true      # auto-answer incoming INVITEs (false: use `ims-answer`)
-  smsFormat: tpdu       # text (OTT) or tpdu (standard RP-DATA/UCS2, TS 24.341)

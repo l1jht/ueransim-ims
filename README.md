@@ -11,7 +11,7 @@ SIP 包在 UERANSIM 进程内直推 NAS/GTP 数据面（`NmUeAppToNas::UPLINK_DA
 - **自动应答呼叫**：`autoAnswer`（默认 true）自动回 180/200；INVITE 带两条 Route（P-CSCF + Service-Route）与真实媒体 SDP；in-dialog 路由遵循 Record-Route；**2xx 按 RFC 3261 Timer G 每 500ms 重传直至 ACK（弱网下 200 丢失可救回）**
 - **RTP 媒体流（P3）**：PCMU 静音流 20ms 双向收发（rtpengine 中转），收包计数暴露于 `ims-status`；P-CSCF N5 AUDIO 组件授权
 - **CLI 控制**：`ims-register`（手动强制重注册）/ `ims-call <uri>` / `ims-answer` / `ims-hangup` / `ims-sms <uri> <text>` / `ims-status`
-- **SMS over IMS**：`ims-sms` 发送 SIP MESSAGE——**双模**：`smsFormat: text`（text/plain, RFC 3428 OTT）或 `tpdu`（标准封装：RP-DATA+SMS-SUBMIT，TS 23.040/24.011/24.341，UCS2 编码，202 应答 + RP-ACK/RP-ERROR 处理）；接收自动应答并打印，最近 10 条经 `ims-status` 的 `smsHistory` 可见（配合短信中心 smsc 存储+异步投递）
+- **SMS over IMS**：`ims-sms` 发送 SIP MESSAGE（标准封装：RP-DATA+SMS-SUBMIT，TS 23.040/24.011/24.341，UCS2 编码，202 应答 + RP-ACK/RP-ERROR 处理）；接收自动应答并打印，最近 10 条经 `ims-status` 的 `smsHistory` 可见（配合短信中心 smsc 存储+异步投递）
 - **零外部依赖**：自实现 SIP 协议栈、MD5（RFC 1321）、Digest（RFC 2617）、AKA（Milenage）、IPv4/UDP 封包（RFC 768）——无 libcurl/libxml/pjsip
 - **与既有行为兼容**：`ims.enable` 默认 false；非 SIP/RTP 流量走原 TUN 路径不变；IMS 失败不影响数据面
 - **单元测试**：`ctest` 覆盖 MD5 向量、IP/UDP 校验和（含奇数长度）、SIP 编解码回环、Digest 已知样本、AKA 挑战（hex/Base64 nonce）、RTP/SDP
@@ -79,7 +79,7 @@ sudo ./nr-ue -c <path-to>/config/ue.yaml
 - ✅ 双向互呼：正/反向全通（注册/CLI 防护/SMS/双向呼叫/媒体/EPCO 共 23 项回归断言全绿）；双 UERANSIM IMS 客户端互呼 10/10 稳定性（早前"外部客户端经 I-CSCF 偶发 500"经查为被叫注册过期表象，注册稳定后不复现）
 - ✅ P3 媒体：RTP 静音流双向收发（rtpengine 中转）+ P-CSCF N5 AUDIO 组件 201
 - ✅ P4 增强：EPCO 下发 P-CSCF（0x000C，EPCO 优先/配置兜底）+ IMS AKA（AKAv1-MD5，S-CSCF `ALGORITHM IS [AKAv1-MD5]` + `Auth succeeded`）
-- ✅ P5 SMS over IMS：`ims-sms` 双向互发（text 与 tpdu 双模），多批次/中文 UTF-8/弱网 25% 丢包无重复投递均验证；tpdu 模式（标准 RP-DATA/UCS2）双向特殊字符与中文、202 应答、RP-ACK 处理、23 断言套件双模全绿（2026-08-18）
+- ✅ P5 SMS over IMS：`ims-sms` 双向互发（**单模式 TPDU**：标准 RP-DATA/UCS2，TS 24.341），特殊字符与中文完整、202 应答、RP-ACK/RP-ERROR、弱网 25% 无重复投递、23 断言套件全绿（2026-08-18/19）
 
 ## 许可
 

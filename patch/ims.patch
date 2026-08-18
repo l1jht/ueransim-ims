@@ -156,10 +156,10 @@ index b99358c..0f04517 100644
      OctetString encode();
  };
 diff --git a/src/ue.cpp b/src/ue.cpp
-index d9e3f85..8090d99 100644
+index d9e3f85..4efe6d2 100644
 --- a/src/ue.cpp
 +++ b/src/ue.cpp
-@@ -224,6 +224,37 @@ static nr::ue::UeConfig *ReadConfigYaml()
+@@ -224,6 +224,35 @@ static nr::ue::UeConfig *ReadConfigYaml()
          }
      }
  
@@ -190,14 +190,12 @@ index d9e3f85..8090d99 100644
 +            result->ims.expires = yaml::GetInt32(ims, "expires", 1, 86400);
 +        if (yaml::HasField(ims, "autoAnswer"))
 +            result->ims.autoAnswer = yaml::GetBool(ims, "autoAnswer");
-+        if (yaml::HasField(ims, "smsFormat"))
-+            result->ims.smsFormat = yaml::GetString(ims, "smsFormat");
 +    }
 +
      yaml::AssertHasField(config, "integrityMaxRate");
      {
          auto uplink = yaml::GetString(config["integrityMaxRate"], "uplink");
-@@ -380,6 +411,7 @@ static nr::ue::UeConfig *GetConfigByUe(int ueIndex)
+@@ -380,6 +409,7 @@ static nr::ue::UeConfig *GetConfigByUe(int ueIndex)
      c->integrityMaxRate = g_refConfig->integrityMaxRate;
      c->uacAic = g_refConfig->uacAic;
      c->uacAcc = g_refConfig->uacAcc;
@@ -839,10 +837,10 @@ index 0000000..0095839
 +} // namespace nr::ue
 diff --git a/src/ue/ims/config.hpp b/src/ue/ims/config.hpp
 new file mode 100644
-index 0000000..d9228f5
+index 0000000..67382fa
 --- /dev/null
 +++ b/src/ue/ims/config.hpp
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,32 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -872,7 +870,6 @@ index 0000000..d9228f5
 +    std::string password{};
 +    int expires{300};
 +    bool autoAnswer{true};
-+    std::string smsFormat{"text"}; // text | tpdu (TS 23.040/24.011 RP-DATA encapsulation)
 +};
 +
 +} // namespace nr::ue
@@ -1123,10 +1120,10 @@ index 0000000..36cf7f1
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.cpp b/src/ue/ims/ims.cpp
 new file mode 100644
-index 0000000..1126525
+index 0000000..f56ed16
 --- /dev/null
 +++ b/src/ue/ims/ims.cpp
-@@ -0,0 +1,1076 @@
+@@ -0,0 +1,1073 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -1569,59 +1566,59 @@ index 0000000..1126525
 +    std::string branch = "z9hG4bK" + generateId();
 +    std::string tag = generateId();
 +
-+    std::string contentType = "text/plain; charset=utf-8";
-+    std::string body = text;
-+    if (m_base->config->ims.smsFormat == "tpdu")
++    // TS 24.341: SMS over IMS is carried as application/vnd.3gpp.sms (RP-DATA + SMS-SUBMIT, UCS2).
++    m_smsRpRef = (m_smsRpRef + 1) & 0xFF;
++    m_smsTpMr = (m_smsTpMr + 1) & 0xFF;
++    auto enc = ims::BuildSubmitRpdu(text, UriUserPart(m_base->config->ims.privateIdentity), UriUserPart(uri),
++                                    m_smsRpRef, m_smsTpMr);
++    if (!enc.ok)
 +    {
-+        m_smsRpRef = (m_smsRpRef + 1) & 0xFF;
-+        m_smsTpMr = (m_smsTpMr + 1) & 0xFF;
-+        auto enc = ims::BuildSubmitRpdu(text, UriUserPart(m_base->config->ims.privateIdentity), UriUserPart(uri),
-+                                        m_smsRpRef, m_smsTpMr);
-+        if (!enc.ok)
-+        {
-+            m_lastSmsResult = "failed (text exceeds single-SMS capacity)";
-+            m_logger->warn("SMS not sent: text exceeds single-SMS capacity (160 septets / 70 UCS2 chars)");
-+            return false;
-+        }
-+        contentType = "application/vnd.3gpp.sms";
-+        body = enc.rpdu;
++        m_lastSmsResult = "failed (text exceeds single-SMS capacity)";
++        m_logger->warn("SMS not sent: text exceeds single-SMS capacity (70 UCS2 chars)");
++        return false;
 +    }
 +
 +    std::string msg = ims::BuildMessage(m_base->config->ims, m_localIp, uri, m_smsCSeq, m_smsCallId, branch, tag,
-+                                        contentType, body);
++                                        "application/vnd.3gpp.sms", enc.rpdu);
 +    sendSipUdp(msg);
 +
 +    m_lastSmsResult = "sent";
 +    armTx(m_smsCallId, m_smsCSeq, "MESSAGE", msg);
-+    m_logger->info("SMS sent to %s [%s]: %s", uri.c_str(), m_base->config->ims.smsFormat.c_str(), text.c_str());
++    m_logger->info("SMS sent to %s [tpdu]: %s", uri.c_str(), text.c_str());
 +    return true;
 +}
 +
 +void ImsClientTask::handleIncomingSms(const ims::SipRequestInfo &req)
 +{
 +    static const std::string CT_3GPP_SMS = "application/vnd.3gpp.sms";
-+    bool isTpdu = req.contentType == CT_3GPP_SMS;
++
++    // TS 24.341: SMS over IMS is carried exclusively in application/vnd.3gpp.sms
++    // bodies (RP-DATA / RP-ACK / RP-ERROR, TS 24.011). Anything else is rejected.
++    if (req.contentType != CT_3GPP_SMS)
++    {
++        m_logger->warn("MESSAGE with unsupported content-type [%s], replying 415",
++                       req.contentType.c_str());
++        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 415, "Unsupported Media Type", req,
++                                      m_dialogMyTag, "", ""));
++        return;
++    }
 +
 +    // TS 24.341 body: RP layer. An RP-ACK only acknowledges our own SUBMIT (the SMS
 +    // center confirms acceptance); it is not a new message.
-+    ims::DeliverParseResult parsed;
-+    if (isTpdu)
++    auto parsed = ims::ParseDownlinkRpdu(req.body);
++    if (parsed.ok && parsed.isAck)
 +    {
-+        parsed = ims::ParseDownlinkRpdu(req.body);
-+        if (parsed.ok && parsed.isAck)
-+        {
-+            m_logger->debug("SMS RP-ACK received");
-+            sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag, "", ""));
-+            return;
-+        }
-+        if (!parsed.ok)
-+        {
-+            // TS 24.011: report the malformed RP message with RP-ERROR.
-+            m_logger->warn("Undecodable SMS RP/TPDU, replying RP-ERROR");
-+            sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag,
-+                                          ims::BuildRpError(0), CT_3GPP_SMS));
-+            return;
-+        }
++        m_logger->debug("SMS RP-ACK received");
++        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag, "", ""));
++        return;
++    }
++    if (!parsed.ok)
++    {
++        // TS 24.011: report the malformed RP message with RP-ERROR.
++        m_logger->warn("Undecodable SMS RP/TPDU, replying RP-ERROR");
++        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag,
++                                      ims::BuildRpError(0), CT_3GPP_SMS));
++        return;
 +    }
 +
 +    // Duplicate suppression, two flavors:
@@ -1635,29 +1632,26 @@ index 0000000..1126525
 +    if (std::find(m_seenMsgKeys.begin(), m_seenMsgKeys.end(), key) != m_seenMsgKeys.end())
 +    {
 +        m_logger->debug("Duplicate MESSAGE suppressed [%s]", key.c_str());
-+        std::string dupBody = isTpdu ? ims::BuildRpAck(parsed.rpRef) : "";
-+        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag, dupBody,
-+                                      isTpdu ? CT_3GPP_SMS : ""));
++        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag,
++                                      ims::BuildRpAck(parsed.rpRef), CT_3GPP_SMS));
 +        return;
 +    }
 +    m_seenMsgKeys.push_back(key);
 +    if (m_seenMsgKeys.size() > 16)
 +        m_seenMsgKeys.pop_front();
 +
-+    std::string peer = isTpdu ? parsed.srcDigits : req.from;
-+    std::string text = isTpdu ? parsed.text : req.body;
++    std::string peer = parsed.srcDigits;
 +    if (peer.empty())
 +        peer = "(unknown)";
-+    m_logger->info("SMS received from %s [%s]: %s", peer.c_str(), isTpdu ? "tpdu" : "text", text.c_str());
-+    m_smsHistory.push_back({peer, text});
++    m_logger->info("SMS received from %s [tpdu]: %s", peer.c_str(), parsed.text.c_str());
++    m_smsHistory.push_back({peer, parsed.text});
 +    if (m_smsHistory.size() > 10)
 +        m_smsHistory.pop_front();
 +
-+    // Single transaction: acknowledge immediately (RFC 3428); for an RP-DATA the 200
-+    // carries the RP-ACK (TS 24.011).
-+    std::string ackBody = isTpdu ? ims::BuildRpAck(parsed.rpRef) : "";
-+    sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag, ackBody,
-+                                  isTpdu ? CT_3GPP_SMS : ""));
++    // Single transaction: acknowledge immediately (RFC 3428); the 200 carries the
++    // RP-ACK for the delivered SMS (TS 24.011).
++    sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag,
++                                  ims::BuildRpAck(parsed.rpRef), CT_3GPP_SMS));
 +}
 +
 +void ImsClientTask::startCall(const std::string &uri)
@@ -2773,10 +2767,10 @@ index 0000000..cb16e33
 +} // namespace nr::ue
 diff --git a/src/ue/ims/sip_stack.cpp b/src/ue/ims/sip_stack.cpp
 new file mode 100644
-index 0000000..46828f7
+index 0000000..75fe9f4
 --- /dev/null
 +++ b/src/ue/ims/sip_stack.cpp
-@@ -0,0 +1,595 @@
+@@ -0,0 +1,597 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -2948,7 +2942,9 @@ index 0000000..46828f7
 +// The local Contact header value for this UE.
 +std::string ContactHeader(const ImsConfig &config, const std::string &localIp)
 +{
-+    return "<sip:" + ContactUser(config) + "@" + localIp + ":" + std::to_string(config.sipPort) + ";ob>";
++    // TS 24.341: the +g.3gpp.smsip feature tag advertises SMS-over-IP capability; the
++    // SMS center routes 3GPP (TPDU) delivery based on it.
++    return "<sip:" + ContactUser(config) + "@" + localIp + ":" + std::to_string(config.sipPort) + ";ob;+g.3gpp.smsip>";
 +}
 +
 +SipAuthChallenge ParseAuthChallenge(const std::string &headerValue)
@@ -3500,10 +3496,10 @@ index 0000000..bb0a563
 +} // namespace nr::ue
 diff --git a/src/ue/ims/sms_tpdu.cpp b/src/ue/ims/sms_tpdu.cpp
 new file mode 100644
-index 0000000..42624ee
+index 0000000..c5af222
 --- /dev/null
 +++ b/src/ue/ims/sms_tpdu.cpp
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,370 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -3823,6 +3819,9 @@ index 0000000..42624ee
 +        return res;
 +    t++; // TP-PID
 +    res.dcs = static_cast<uint8_t>(body[t++]);
++    t += 7; // TP-SCTS (service-centre time stamp, TS 23.040 9.2.2.1) precedes TP-UDL
++    if (t >= p + tpduLen)
++        return res;
 +    int udl = static_cast<uint8_t>(body[t++]);
 +
 +    if (res.dcs == DCS_UCS2)
@@ -4478,10 +4477,10 @@ index 0000000..de3a61e
 +add_test(NAME ims-tests COMMAND ims-tests)
 diff --git a/tests/ims_tests.cpp b/tests/ims_tests.cpp
 new file mode 100644
-index 0000000..11d8a8c
+index 0000000..9021960
 --- /dev/null
 +++ b/tests/ims_tests.cpp
-@@ -0,0 +1,675 @@
+@@ -0,0 +1,677 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -4795,7 +4794,7 @@ index 0000000..11d8a8c
 +    CHECK(req.callId == "call-1@ip");
 +    CHECK(req.cseq == 1);
 +    CHECK(req.cseqMethod == "INVITE");
-+    CHECK(req.contact == "<sip:001011234567895@192.168.101.3:5060;ob>");
++    CHECK(req.contact == "<sip:001011234567895@192.168.101.3:5060;ob;+g.3gpp.smsip>");
 +
 +    auto reply = BuildSipReply(c, "192.168.101.5", 200, "OK", req, "tag-callee", PlaceholderSdp("192.168.101.5"), "application/sdp");
 +    auto resp = ParseSipResponse(reply);
@@ -5107,6 +5106,8 @@ index 0000000..11d8a8c
 +        tpdu += EncodeSemiOctets("001011234567895");
 +        tpdu.push_back((char)0x00); // TP-PID
 +        tpdu.push_back((char)0x08); // TP-DCS UCS2
++        for (int i = 0; i < 7; i++) // TP-SCTS (service-centre time stamp)
++            tpdu.push_back((char)0x00);
 +        auto ucs2 = Utf8ToUcs2Be("\xE4\xB8\xAD\xE6\x96\x87");
 +        tpdu.push_back((char)ucs2.size()); // TP-UDL
 +        tpdu += ucs2;
