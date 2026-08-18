@@ -36,6 +36,7 @@ src/ue/ims/
 - **重传事务表化**（2026-08-17）：INVITE/BYE/MESSAGE 的重传生命周期由 `SipTransactionTable` 按 Call-ID+CSeq 键控，单一 500ms 扫描定时器驱动。**修复两个缺陷**：① 旧单槽位 `m_pendingTxRequest` 被后发事务覆盖（INVITE 重传窗口内发 SMS 会丢 INVITE 重传）；② SMS 响应只按 Call-ID 匹配（所有 SMS 复用同一 Call-ID），迟到的旧响应会 cancelTx 杀掉其他事务的重传。现：响应只取消自身事务；SMS 分支补 CSeq 校验，错配迟到响应 debug 日志后丢弃。注册不入表（保持 TIMER_REG_TIMEOUT 机制）
 - **1xx 停重传（RFC 3261 §17.1.1，2026-08-17）**：事务条目携带 method（`isInvite()` 查询）；取消谓词 = `≥200 最终响应 || INVITE 事务的任意响应`——INVITE 收 1xx 进入 proceeding 态停 Timer A（与真 UE 一致），BYE/MESSAGE 仍等最终响应。200 丢失恢复由被叫侧 Timer G 端到端覆盖（旧"180 后继续重传 INVITE"是冗余恢复路径，已移除）
 - **MESSAGE UAS 去重**（2026-08-17，弱网测试发现的既有缺陷）：被叫 200 丢失时短信中心会重传（同 Call-ID+CSeq 的 uac 事务重传）或重投递（SMS_WORKER 轮询的新事务、同 X-MSG-ID），旧实现两种都重复入 history。现：键缓存（16 条）= 有 X-MSG-ID 用 `id:<msgId>`、否则 `<callId>:<cseq>`；命中则重发 200（中心需要它删记录）但不重复处理（RFC 3261 §17.2.2 非 INVITE 服务端事务语义）。ParseSipRequest 增加 X-MSG-ID 提取
+- **SMS TPDU 双模**（2026-08-18）：`ims.smsFormat: text|tpdu`（默认 text）。tpdu 模式按 TS 23.040/24.011/24.341 封装——上行 MESSAGE body = RP-DATA(MS→net) + SMS-SUBMIT TPDU，Content-Type `application/vnd.3gpp.sms`；下行解析 RP-DATA + SMS-DELIVER（TP-OA/TP-DCS/TP-UD）与 RP-ACK（仅回 200、不入 history），不可解析回 200 + RP-ERROR（cause 95）。上行应答接受任意 2xx（smsc 3GPP 路径回 202）。**编码统一 UCS2**（DCS=0x08，容量 70 字符）：kamailio smsops 的 gsm7bit_codes 表在 septet 0x2D 错位（0xAD 软连字符而非 '-'），7-bit 路径对其不可靠——UCS2 是 TS 23.038 强制支持的编码、实测全链通过。接收侧保留 7-bit/UCS2 双解码（标准兼容）。TPDU 模块为纯函数（sms_tpdu.cpp，字节层编解码 + 7-bit/UCS2/半八位）
 
 ## 信令流程
 

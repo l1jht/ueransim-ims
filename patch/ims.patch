@@ -156,10 +156,10 @@ index b99358c..0f04517 100644
      OctetString encode();
  };
 diff --git a/src/ue.cpp b/src/ue.cpp
-index d9e3f85..4efe6d2 100644
+index d9e3f85..8090d99 100644
 --- a/src/ue.cpp
 +++ b/src/ue.cpp
-@@ -224,6 +224,35 @@ static nr::ue::UeConfig *ReadConfigYaml()
+@@ -224,6 +224,37 @@ static nr::ue::UeConfig *ReadConfigYaml()
          }
      }
  
@@ -190,12 +190,14 @@ index d9e3f85..4efe6d2 100644
 +            result->ims.expires = yaml::GetInt32(ims, "expires", 1, 86400);
 +        if (yaml::HasField(ims, "autoAnswer"))
 +            result->ims.autoAnswer = yaml::GetBool(ims, "autoAnswer");
++        if (yaml::HasField(ims, "smsFormat"))
++            result->ims.smsFormat = yaml::GetString(ims, "smsFormat");
 +    }
 +
      yaml::AssertHasField(config, "integrityMaxRate");
      {
          auto uplink = yaml::GetString(config["integrityMaxRate"], "uplink");
-@@ -380,6 +409,7 @@ static nr::ue::UeConfig *GetConfigByUe(int ueIndex)
+@@ -380,6 +411,7 @@ static nr::ue::UeConfig *GetConfigByUe(int ueIndex)
      c->integrityMaxRate = g_refConfig->integrityMaxRate;
      c->uacAic = g_refConfig->uacAic;
      c->uacAcc = g_refConfig->uacAcc;
@@ -837,10 +839,10 @@ index 0000000..0095839
 +} // namespace nr::ue
 diff --git a/src/ue/ims/config.hpp b/src/ue/ims/config.hpp
 new file mode 100644
-index 0000000..67382fa
+index 0000000..d9228f5
 --- /dev/null
 +++ b/src/ue/ims/config.hpp
-@@ -0,0 +1,32 @@
+@@ -0,0 +1,33 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -870,6 +872,7 @@ index 0000000..67382fa
 +    std::string password{};
 +    int expires{300};
 +    bool autoAnswer{true};
++    std::string smsFormat{"text"}; // text | tpdu (TS 23.040/24.011 RP-DATA encapsulation)
 +};
 +
 +} // namespace nr::ue
@@ -1120,10 +1123,10 @@ index 0000000..36cf7f1
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.cpp b/src/ue/ims/ims.cpp
 new file mode 100644
-index 0000000..61181e3
+index 0000000..1126525
 --- /dev/null
 +++ b/src/ue/ims/ims.cpp
-@@ -0,0 +1,1009 @@
+@@ -0,0 +1,1076 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -1178,6 +1181,19 @@ index 0000000..61181e3
 +            out += out.empty() ? r : "," + r;
 +    }
 +    return out;
++}
++
++// The user part of a SIP URI or a bare identity (digits before '@').
++std::string UriUserPart(const std::string &uri)
++{
++    std::string u = uri;
++    auto colon = u.find(':');
++    if (colon != std::string::npos)
++        u = u.substr(colon + 1);
++    auto at = u.find('@');
++    if (at != std::string::npos)
++        u = u.substr(0, at);
++    return u;
 +}
 +
 +} // namespace
@@ -1377,8 +1393,10 @@ index 0000000..61181e3
 +            sendResponse(msg.address, "Usage: ims-sms <uri> <text>", true);
 +            break;
 +        }
-+        sendSms(msg.cmd->smsUri, msg.cmd->smsText);
-+        sendResponse(msg.address, "IMS SMS sent", false);
++        if (sendSms(msg.cmd->smsUri, msg.cmd->smsText))
++            sendResponse(msg.address, "IMS SMS sent", false);
++        else
++            sendResponse(msg.address, "IMS SMS rejected: " + m_lastSmsResult, true);
 +        break;
 +    case app::UeCliCommand::IMS_ANSWER:
 +        if (m_callState == ECallState::RINGING)
@@ -1543,7 +1561,7 @@ index 0000000..61181e3
 +        m_logger->debug("REGISTER sent [cseq=%d]", m_cseq);
 +}
 +
-+void ImsClientTask::sendSms(const std::string &uri, const std::string &text)
++bool ImsClientTask::sendSms(const std::string &uri, const std::string &text)
 +{
 +    m_smsCSeq++;
 +    if (m_smsCallId.empty())
@@ -1551,16 +1569,61 @@ index 0000000..61181e3
 +    std::string branch = "z9hG4bK" + generateId();
 +    std::string tag = generateId();
 +
-+    std::string body = ims::BuildMessage(m_base->config->ims, m_localIp, uri, m_smsCSeq, m_smsCallId, branch, tag, text);
-+    sendSipUdp(body);
++    std::string contentType = "text/plain; charset=utf-8";
++    std::string body = text;
++    if (m_base->config->ims.smsFormat == "tpdu")
++    {
++        m_smsRpRef = (m_smsRpRef + 1) & 0xFF;
++        m_smsTpMr = (m_smsTpMr + 1) & 0xFF;
++        auto enc = ims::BuildSubmitRpdu(text, UriUserPart(m_base->config->ims.privateIdentity), UriUserPart(uri),
++                                        m_smsRpRef, m_smsTpMr);
++        if (!enc.ok)
++        {
++            m_lastSmsResult = "failed (text exceeds single-SMS capacity)";
++            m_logger->warn("SMS not sent: text exceeds single-SMS capacity (160 septets / 70 UCS2 chars)");
++            return false;
++        }
++        contentType = "application/vnd.3gpp.sms";
++        body = enc.rpdu;
++    }
++
++    std::string msg = ims::BuildMessage(m_base->config->ims, m_localIp, uri, m_smsCSeq, m_smsCallId, branch, tag,
++                                        contentType, body);
++    sendSipUdp(msg);
 +
 +    m_lastSmsResult = "sent";
-+    armTx(m_smsCallId, m_smsCSeq, "MESSAGE", body);
-+    m_logger->info("SMS sent to %s: %s", uri.c_str(), text.c_str());
++    armTx(m_smsCallId, m_smsCSeq, "MESSAGE", msg);
++    m_logger->info("SMS sent to %s [%s]: %s", uri.c_str(), m_base->config->ims.smsFormat.c_str(), text.c_str());
++    return true;
 +}
 +
 +void ImsClientTask::handleIncomingSms(const ims::SipRequestInfo &req)
 +{
++    static const std::string CT_3GPP_SMS = "application/vnd.3gpp.sms";
++    bool isTpdu = req.contentType == CT_3GPP_SMS;
++
++    // TS 24.341 body: RP layer. An RP-ACK only acknowledges our own SUBMIT (the SMS
++    // center confirms acceptance); it is not a new message.
++    ims::DeliverParseResult parsed;
++    if (isTpdu)
++    {
++        parsed = ims::ParseDownlinkRpdu(req.body);
++        if (parsed.ok && parsed.isAck)
++        {
++            m_logger->debug("SMS RP-ACK received");
++            sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag, "", ""));
++            return;
++        }
++        if (!parsed.ok)
++        {
++            // TS 24.011: report the malformed RP message with RP-ERROR.
++            m_logger->warn("Undecodable SMS RP/TPDU, replying RP-ERROR");
++            sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag,
++                                          ims::BuildRpError(0), CT_3GPP_SMS));
++            return;
++        }
++    }
++
 +    // Duplicate suppression, two flavors:
 +    //  - RFC 3261 17.2.2 retransmission: same Call-ID + CSeq (the SMS center's uac
 +    //    retransmits when our 200 was lost);
@@ -1568,27 +1631,33 @@ index 0000000..61181e3
 +    //    as a fresh transaction but with the same X-MSG-ID.
 +    // Either way the request is acknowledged again (the center needs the 200 to drop the
 +    // record) but must not be processed twice.
-+    std::string key = req.msgId.empty() ? req.callId + ":" + std::to_string(req.cseq)
-+                                        : "id:" + req.msgId;
++    std::string key = req.msgId.empty() ? req.callId + ":" + std::to_string(req.cseq) : "id:" + req.msgId;
 +    if (std::find(m_seenMsgKeys.begin(), m_seenMsgKeys.end(), key) != m_seenMsgKeys.end())
 +    {
 +        m_logger->debug("Duplicate MESSAGE suppressed [%s]", key.c_str());
-+        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag, ""));
++        std::string dupBody = isTpdu ? ims::BuildRpAck(parsed.rpRef) : "";
++        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag, dupBody,
++                                      isTpdu ? CT_3GPP_SMS : ""));
 +        return;
 +    }
 +    m_seenMsgKeys.push_back(key);
 +    if (m_seenMsgKeys.size() > 16)
 +        m_seenMsgKeys.pop_front();
 +
-+    std::string peer = req.from.empty() ? "(unknown)" : req.from;
-+    m_logger->info("SMS received from %s: %s", peer.c_str(), req.body.c_str());
-+    m_smsHistory.push_back({peer, req.body});
++    std::string peer = isTpdu ? parsed.srcDigits : req.from;
++    std::string text = isTpdu ? parsed.text : req.body;
++    if (peer.empty())
++        peer = "(unknown)";
++    m_logger->info("SMS received from %s [%s]: %s", peer.c_str(), isTpdu ? "tpdu" : "text", text.c_str());
++    m_smsHistory.push_back({peer, text});
 +    if (m_smsHistory.size() > 10)
 +        m_smsHistory.pop_front();
 +
-+    // Single transaction: acknowledge immediately (RFC 3428).
-+    std::string reply = ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag, "");
-+    sendSipUdp(reply);
++    // Single transaction: acknowledge immediately (RFC 3428); for an RP-DATA the 200
++    // carries the RP-ACK (TS 24.011).
++    std::string ackBody = isTpdu ? ims::BuildRpAck(parsed.rpRef) : "";
++    sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag, ackBody,
++                                  isTpdu ? CT_3GPP_SMS : ""));
 +}
 +
 +void ImsClientTask::startCall(const std::string &uri)
@@ -1864,7 +1933,8 @@ index 0000000..61181e3
 +void ImsClientTask::sendCallReply(const ims::SipRequestInfo &req, int code, const std::string &reason,
 +                                  const std::string &body)
 +{
-+    std::string reply = ims::BuildSipReply(m_base->config->ims, m_localIp, code, reason, req, m_dialogMyTag, body);
++    std::string reply = ims::BuildSipReply(m_base->config->ims, m_localIp, code, reason, req, m_dialogMyTag, body,
++                                           "application/sdp");
 +    sendSipUdp(reply);
 +    m_logger->debug("SIP reply sent [%d %s]", code, reason.c_str());
 +}
@@ -1927,7 +1997,7 @@ index 0000000..61181e3
 +        }
 +        if (info.statusCode >= 200)
 +        {
-+            m_lastSmsResult = (info.statusCode == 200)
++            m_lastSmsResult = (info.statusCode >= 200 && info.statusCode < 300)
 +                                  ? "delivered (" + std::to_string(info.statusCode) + ")"
 +                                  : "failed (" + std::to_string(info.statusCode) + " " + info.reasonPhrase + ")";
 +            m_logger->info("SMS result: %s", m_lastSmsResult.c_str());
@@ -2135,10 +2205,10 @@ index 0000000..61181e3
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.hpp b/src/ue/ims/ims.hpp
 new file mode 100644
-index 0000000..5e027ca
+index 0000000..e784483
 --- /dev/null
 +++ b/src/ue/ims/ims.hpp
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,178 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -2161,6 +2231,7 @@ index 0000000..5e027ca
 +#include "auth.hpp"
 +#include "media.hpp"
 +#include "sip_stack.hpp"
++#include "sms_tpdu.hpp"
 +#include "transaction.hpp"
 +
 +namespace nr::ue
@@ -2246,6 +2317,8 @@ index 0000000..5e027ca
 +    int m_smsCSeq{0};
 +    std::string m_smsCallId;
 +    std::string m_lastSmsResult;
++    int m_smsRpRef{0};  // RP-Reference counter (TS 24.011), TPDU mode
++    int m_smsTpMr{0};   // TP-Message-Reference counter (TS 23.040), TPDU mode
 +    std::deque<std::pair<std::string, std::string>> m_smsHistory{};  // recent (peer, text) up to 10
 +    // Dedup keys of recently processed incoming MESSAGEs (RFC 3261 17.2.2 retransmissions
 +    // and SMS-center redeliveries carrying the same X-MSG-ID).
@@ -2292,7 +2365,7 @@ index 0000000..5e027ca
 +    void sendInvite(bool withAuth);
 +    void sendAck();
 +    void sendErrorAck();
-+    void sendSms(const std::string &uri, const std::string &text);
++    bool sendSms(const std::string &uri, const std::string &text);
 +    void handleIncomingSms(const ims::SipRequestInfo &req);
 +    void startMedia(const std::string &peerIp, int peerPort);
 +    void stopMedia();
@@ -2700,10 +2773,10 @@ index 0000000..cb16e33
 +} // namespace nr::ue
 diff --git a/src/ue/ims/sip_stack.cpp b/src/ue/ims/sip_stack.cpp
 new file mode 100644
-index 0000000..4e7f7f5
+index 0000000..46828f7
 --- /dev/null
 +++ b/src/ue/ims/sip_stack.cpp
-@@ -0,0 +1,589 @@
+@@ -0,0 +1,595 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -2985,27 +3058,27 @@ index 0000000..4e7f7f5
 +
 +std::string BuildMessage(const ImsConfig &config, const std::string &localIp, const std::string &remoteUri,
 +                         int cseq, const std::string &callId, const std::string &branch, const std::string &tag,
-+                         const std::string &text)
++                         const std::string &contentType, const std::string &body)
 +{
 +    std::string fromTo = config.publicIdentity;
 +    if (fromTo.rfind("sip:", 0) != 0 && fromTo.rfind("sips:", 0) != 0)
 +        fromTo = "sip:" + fromTo;
 +
-+    std::string body;
-+    body += "MESSAGE " + remoteUri + " SIP/2.0\r\n";
-+    body += MakeHeader("Via", "SIP/2.0/UDP " + localIp + ":" + std::to_string(config.sipPort) + ";rport;branch=" + branch);
-+    body += MakeHeader("Route", "<sip:" + config.pcscf + ":" + std::to_string(config.pcscfPort) + ";lr>");
-+    body += MakeHeader("Max-Forwards", "70");
-+    body += MakeHeader("From", "<" + fromTo + ">;tag=" + tag);
-+    body += MakeHeader("To", "<" + remoteUri + ">");
-+    body += MakeHeader("Call-ID", callId);
-+    body += MakeHeader("CSeq", std::to_string(cseq) + " MESSAGE");
-+    body += MakeHeader("Contact", ContactHeader(config, localIp));
-+    body += MakeHeader("Content-Type", "text/plain; charset=utf-8");
-+    body += MakeHeader("Content-Length", std::to_string(text.size()));
-+    body += "\r\n";
-+    body += text;
-+    return body;
++    std::string out;
++    out += "MESSAGE " + remoteUri + " SIP/2.0\r\n";
++    out += MakeHeader("Via", "SIP/2.0/UDP " + localIp + ":" + std::to_string(config.sipPort) + ";rport;branch=" + branch);
++    out += MakeHeader("Route", "<sip:" + config.pcscf + ":" + std::to_string(config.pcscfPort) + ";lr>");
++    out += MakeHeader("Max-Forwards", "70");
++    out += MakeHeader("From", "<" + fromTo + ">;tag=" + tag);
++    out += MakeHeader("To", "<" + remoteUri + ">");
++    out += MakeHeader("Call-ID", callId);
++    out += MakeHeader("CSeq", std::to_string(cseq) + " MESSAGE");
++    out += MakeHeader("Contact", ContactHeader(config, localIp));
++    out += MakeHeader("Content-Type", contentType);
++    out += MakeHeader("Content-Length", std::to_string(body.size()));
++    out += "\r\n";
++    out += body;
++    return out;
 +}
 +
 +std::string BuildInDialogRequest(const std::string &method, const std::string &localIp, const ImsConfig &config,
@@ -3075,7 +3148,7 @@ index 0000000..4e7f7f5
 +
 +std::string BuildSipReply(const ImsConfig &config, const std::string &localIp, int statusCode,
 +                          const std::string &reasonPhrase, const SipRequestInfo &req, const std::string &toTag,
-+                          const std::string &body)
++                          const std::string &body, const std::string &contentType)
 +{
 +    std::string out;
 +    out += "SIP/2.0 " + std::to_string(statusCode) + " " + reasonPhrase + "\r\n";
@@ -3099,7 +3172,7 @@ index 0000000..4e7f7f5
 +    out += MakeHeader("Contact", ContactHeader(config, localIp));
 +    if (!body.empty())
 +    {
-+        out += MakeHeader("Content-Type", "application/sdp");
++        out += MakeHeader("Content-Type", contentType);
 +        out += MakeHeader("Content-Length", std::to_string(body.size()));
 +        out += "\r\n";
 +        out += body;
@@ -3280,6 +3353,12 @@ index 0000000..4e7f7f5
 +            info.recordRoutes.push_back(Trim(value));
 +        else if (lname == "x-msg-id")
 +            info.msgId = Trim(value);
++        else if (lname == "content-type")
++        {
++            auto val = Trim(value);
++            auto semi = val.find(';');
++            info.contentType = Trim(semi == std::string::npos ? val : val.substr(0, semi));
++        }
 +    };
 +    ScanSipHeaders(stream, process, body);
 +
@@ -3295,10 +3374,10 @@ index 0000000..4e7f7f5
 +} // namespace nr::ue
 diff --git a/src/ue/ims/sip_stack.hpp b/src/ue/ims/sip_stack.hpp
 new file mode 100644
-index 0000000..1131da0
+index 0000000..bb0a563
 --- /dev/null
 +++ b/src/ue/ims/sip_stack.hpp
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,120 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -3361,6 +3440,7 @@ index 0000000..1131da0
 +    std::string cseqMethod;
 +    std::string contact;
 +    std::string body;
++    std::string contentType; // media type only (parameters stripped)
 +    std::string msgId; // X-MSG-ID (SMS center delivery identifier, redelivery dedup)
 +    std::vector<std::string> recordRoutes;
 +};
@@ -3380,7 +3460,7 @@ index 0000000..1131da0
 +// Builds an out-of-dialog MESSAGE request (SMS over IMS, RFC 3428): single transaction, no dialog state.
 +std::string BuildMessage(const ImsConfig &config, const std::string &localIp, const std::string &remoteUri,
 +                         int cseq, const std::string &callId, const std::string &branch, const std::string &tag,
-+                         const std::string &text);
++                         const std::string &contentType, const std::string &body);
 +
 +// Builds an in-dialog request (ACK/BYE). routeSet is the list of Route header values.
 +std::string BuildInDialogRequest(const std::string &method, const std::string &localIp, const ImsConfig &config,
@@ -3394,9 +3474,10 @@ index 0000000..1131da0
 +                          const std::string &callId, const std::string &fromTag, int cseq);
 +
 +// Builds a response to an incoming request (echoes Via/From/Call-ID/CSeq, adds local To tag + Contact).
++// contentType is used when body is non-empty.
 +std::string BuildSipReply(const ImsConfig &config, const std::string &localIp, int statusCode,
 +                          const std::string &reasonPhrase, const SipRequestInfo &req, const std::string &toTag,
-+                          const std::string &body);
++                          const std::string &body, const std::string &contentType);
 +
 +// Parses a SIP response (status line + headers).
 +SipResponseInfo ParseSipResponse(const std::string &text);
@@ -3414,6 +3495,466 @@ index 0000000..1131da0
 +// Parses the c= (connection address) and m= (media port) of an SDP answer/offer.
 +// Returns true and fills out the media address when both are present.
 +bool ParseSdpMedia(const std::string &sdp, std::string &outAddress, int &outPort);
++
++} // namespace ims
++} // namespace nr::ue
+diff --git a/src/ue/ims/sms_tpdu.cpp b/src/ue/ims/sms_tpdu.cpp
+new file mode 100644
+index 0000000..42624ee
+--- /dev/null
++++ b/src/ue/ims/sms_tpdu.cpp
+@@ -0,0 +1,367 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#include "sms_tpdu.hpp"
++
++namespace nr::ue
++{
++namespace ims
++{
++
++namespace
++{
++
++constexpr const uint8_t TON_UNKNOWN = 0x81;
++constexpr const uint8_t TPDU_SUBMIT_FLAGS = 0x05;  // TP-MTI=01 (SUBMIT) | TP-RD
++constexpr const uint8_t TPDU_DELIVER_MASK = 0x03;  // TP-MTI bits
++constexpr const uint8_t DCS_UCS2 = 0x08;
++constexpr const int MAX_UCS2_UNITS = 70;
++
++void AppendSemiOctetAddress(std::string &out, const std::string &digits)
++{
++    out.push_back(static_cast<char>(1 + EncodeSemiOctets(digits).size())); // len incl. TON byte
++    out.push_back(static_cast<char>(TON_UNKNOWN));
++    out += EncodeSemiOctets(digits);
++}
++
++} // namespace
++
++std::string Pack7Bit(const std::vector<uint8_t> &septets)
++{
++    std::string out;
++    int bit = 0;
++    uint16_t acc = 0;
++    for (uint8_t s : septets)
++    {
++        acc |= static_cast<uint16_t>(s & 0x7F) << bit;
++        bit += 7;
++        if (bit >= 8)
++        {
++            out.push_back(static_cast<char>(acc & 0xFF));
++            acc >>= 8;
++            bit -= 8;
++        }
++    }
++    if (bit > 0)
++        out.push_back(static_cast<char>(acc & 0xFF));
++    return out;
++}
++
++std::vector<uint8_t> Unpack7Bit(const std::string &octets, int septetCount)
++{
++    std::vector<uint8_t> out;
++    if (octets.empty() || septetCount <= 0)
++        return out;
++    int bit = 0;
++    for (int i = 0; i < septetCount; i++)
++    {
++        int bytePos = bit / 8;
++        int bitPos = bit % 8;
++        if (bytePos >= (int)octets.size())
++            break;
++        uint16_t v = static_cast<uint8_t>(octets[bytePos]);
++        if (bytePos + 1 < (int)octets.size())
++            v |= static_cast<uint16_t>(static_cast<uint8_t>(octets[bytePos + 1])) << 8;
++        out.push_back(static_cast<uint8_t>((v >> bitPos) & 0x7F));
++        bit += 7;
++    }
++    return out;
++}
++
++std::string Utf8ToUcs2Be(const std::string &utf8)
++{
++    std::string out;
++    size_t i = 0;
++    while (i < utf8.size())
++    {
++        uint32_t cp = 0;
++        uint8_t c = static_cast<uint8_t>(utf8[i]);
++        int extra = 0;
++        if (c < 0x80)
++            cp = c;
++        else if ((c & 0xE0) == 0xC0)
++            cp = c & 0x1F, extra = 1;
++        else if ((c & 0xF0) == 0xE0)
++            cp = c & 0x0F, extra = 2;
++        else if ((c & 0xF8) == 0xF0)
++            cp = c & 0x07, extra = 3;
++        else
++        {
++            i++;
++            continue;
++        }
++        i++;
++        for (int k = 0; k < extra && i < utf8.size(); k++, i++)
++            cp = (cp << 6) | (static_cast<uint8_t>(utf8[i]) & 0x3F);
++
++        if (cp <= 0xFFFF)
++        {
++            out.push_back(static_cast<char>((cp >> 8) & 0xFF));
++            out.push_back(static_cast<char>(cp & 0xFF));
++        }
++        else
++        {
++            cp -= 0x10000;
++            uint16_t hi = static_cast<uint16_t>(0xD800 + (cp >> 10));
++            uint16_t lo = static_cast<uint16_t>(0xDC00 + (cp & 0x3FF));
++            out.push_back(static_cast<char>((hi >> 8) & 0xFF));
++            out.push_back(static_cast<char>(hi & 0xFF));
++            out.push_back(static_cast<char>((lo >> 8) & 0xFF));
++            out.push_back(static_cast<char>(lo & 0xFF));
++        }
++    }
++    return out;
++}
++
++std::string Ucs2BeToUtf8(const std::string &ucs2)
++{
++    std::string out;
++    auto emit = [&out](uint32_t cp)
++    {
++        if (cp < 0x80)
++            out.push_back(static_cast<char>(cp));
++        else if (cp < 0x800)
++        {
++            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
++            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
++        }
++        else if (cp < 0x10000)
++        {
++            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
++            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
++            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
++        }
++        else
++        {
++            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
++            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
++            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
++            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
++        }
++    };
++
++    for (size_t i = 0; i + 1 < ucs2.size(); i += 2)
++    {
++        uint16_t u = (static_cast<uint8_t>(ucs2[i]) << 8) | static_cast<uint8_t>(ucs2[i + 1]);
++        if (u >= 0xD800 && u <= 0xDBFF && i + 3 < ucs2.size())
++        {
++            uint16_t lo = (static_cast<uint8_t>(ucs2[i + 2]) << 8) | static_cast<uint8_t>(ucs2[i + 3]);
++            if (lo >= 0xDC00 && lo <= 0xDFFF)
++            {
++                emit(0x10000 + ((static_cast<uint32_t>(u - 0xD800) << 10) | (lo - 0xDC00)));
++                i += 2;
++                continue;
++            }
++        }
++        emit(u);
++    }
++    return out;
++}
++
++std::string EncodeSemiOctets(const std::string &digits)
++{
++    std::string out;
++    for (size_t i = 0; i < digits.size(); i += 2)
++    {
++        uint8_t lo = static_cast<uint8_t>(digits[i] - '0');
++        uint8_t hi = (i + 1 < digits.size()) ? static_cast<uint8_t>(digits[i + 1] - '0') : 0x0F;
++        out.push_back(static_cast<char>((hi << 4) | lo));
++    }
++    return out;
++}
++
++std::string DecodeSemiOctets(const uint8_t *data, int digitCount)
++{
++    std::string out;
++    for (int i = 0; i < digitCount; i++)
++    {
++        uint8_t b = data[i / 2];
++        uint8_t d = (i % 2 == 0) ? (b & 0x0F) : ((b >> 4) & 0x0F);
++        if (d > 9)
++            break;
++        out.push_back(static_cast<char>('0' + d));
++    }
++    return out;
++}
++
++bool IsAsciiGsm(const std::string &utf8)
++{
++    for (char c : utf8)
++    {
++        uint8_t u = static_cast<uint8_t>(c);
++        if (u < 0x20 || u > 0x7E)
++            return false;
++    }
++    return true;
++}
++
++TpduEncodeResult BuildSubmitRpdu(const std::string &text, const std::string &srcDigits,
++                                 const std::string &dstDigits, int rpRef, int tpMr)
++{
++    TpduEncodeResult res;
++
++    // Encoding: UCS2 (TS 23.038) only. GSM 7-bit is the default alphabet, but the
++    // deployed kamailio smsops table has a defect at septet 0x2D (decoded as 0xAD
++    // soft hyphen instead of '-'), so the 7-bit path is unreliable against it.
++    // UCS2 is mandatory in TS 23.038 for non-GSM text and works cleanly end to end.
++    std::string ud = Utf8ToUcs2Be(text);
++    if ((int)ud.size() / 2 > MAX_UCS2_UNITS)
++        return res;
++    uint8_t dcs = DCS_UCS2;
++    int udLen = static_cast<int>(ud.size());
++
++    std::string tpdu;
++    tpdu.push_back(static_cast<char>(TPDU_SUBMIT_FLAGS));
++    tpdu.push_back(static_cast<char>(tpMr & 0xFF));
++    tpdu.push_back(static_cast<char>(dstDigits.size())); // TP-DA length in digits
++    tpdu.push_back(static_cast<char>(TON_UNKNOWN));
++    tpdu += EncodeSemiOctets(dstDigits);
++    tpdu.push_back(static_cast<char>(0x00)); // TP-PID
++    tpdu.push_back(static_cast<char>(dcs));  // TP-DCS
++    tpdu.push_back(static_cast<char>(udLen & 0xFF)); // TP-UDL
++    tpdu += ud;
++
++    std::string rpdu;
++    rpdu.push_back(static_cast<char>(ERpType::RP_DATA_MS_TO_NETWORK));
++    rpdu.push_back(static_cast<char>(rpRef & 0xFF));
++    AppendSemiOctetAddress(rpdu, srcDigits); // RP-Originator
++    rpdu.push_back(static_cast<char>(0x00)); // RP-Destination: empty for MO
++    rpdu.push_back(static_cast<char>(tpdu.size()));
++    rpdu += tpdu;
++
++    res.ok = true;
++    res.rpdu = rpdu;
++    res.dcs = dcs;
++    res.septets = udLen;
++    return res;
++}
++
++DeliverParseResult ParseDownlinkRpdu(const std::string &body)
++{
++    DeliverParseResult res;
++    if (body.size() < 2)
++        return res;
++
++    uint8_t rpType = static_cast<uint8_t>(body[0]);
++    if (rpType == static_cast<uint8_t>(ERpType::RP_ACK_MS_TO_NETWORK) ||
++        rpType == static_cast<uint8_t>(ERpType::RP_ACK_NETWORK_TO_MS))
++    {
++        res.ok = true;
++        res.isAck = true;
++        return res;
++    }
++    if (rpType != static_cast<uint8_t>(ERpType::RP_DATA_NETWORK_TO_MS) &&
++        rpType != static_cast<uint8_t>(ERpType::RP_DATA_MS_TO_NETWORK))
++        return res;
++
++    size_t p = 1;
++    res.rpRef = static_cast<uint8_t>(body[p++]);
++
++    auto skipAddress = [&](bool &err)
++    {
++        if (p >= body.size())
++        {
++            err = true;
++            return;
++        }
++        int len = static_cast<uint8_t>(body[p++]);
++        if (len > 0)
++        {
++            if (p + len > body.size())
++            {
++                err = true;
++                return;
++            }
++            p += len;
++        }
++    };
++
++    bool err = false;
++    skipAddress(err); // RP-Originator
++    if (!err)
++        skipAddress(err); // RP-Destination
++    if (err || p >= body.size())
++        return res;
++
++    int tpduLen = static_cast<uint8_t>(body[p++]);
++    if (tpduLen <= 0 || p + tpduLen > body.size())
++        return res;
++    size_t t = p;
++
++    uint8_t flags = static_cast<uint8_t>(body[t++]);
++    if ((flags & TPDU_DELIVER_MASK) != 0x00) // expect SMS-DELIVER
++        return res;
++
++    // TP-OA
++    if (t >= p + tpduLen)
++        return res;
++    int oaDigits = static_cast<uint8_t>(body[t++]);
++    if (oaDigits > 0)
++    {
++        if (t >= p + tpduLen)
++            return res;
++        t++; // TON byte
++        int oaBytes = (oaDigits + 1) / 2;
++        if (t + oaBytes > p + tpduLen)
++            return res;
++        res.srcDigits = DecodeSemiOctets(reinterpret_cast<const uint8_t *>(body.data() + t), oaDigits);
++        t += oaBytes;
++    }
++
++    if (t + 3 > p + tpduLen)
++        return res;
++    t++; // TP-PID
++    res.dcs = static_cast<uint8_t>(body[t++]);
++    int udl = static_cast<uint8_t>(body[t++]);
++
++    if (res.dcs == DCS_UCS2)
++    {
++        if (t + udl > p + tpduLen)
++            return res;
++        res.text = Ucs2BeToUtf8(body.substr(t, udl));
++    }
++    else
++    {
++        int octets = (udl * 7 + 7) / 8;
++        if (t + octets > p + tpduLen)
++            return res;
++        auto septets = Unpack7Bit(body.substr(t, octets), udl);
++        res.text.assign(septets.begin(), septets.end());
++    }
++
++    res.ok = true;
++    return res;
++}
++
++std::string BuildRpAck(int rpRef)
++{
++    std::string out;
++    out.push_back(static_cast<char>(ERpType::RP_ACK_MS_TO_NETWORK));
++    out.push_back(static_cast<char>(rpRef & 0xFF));
++    out.push_back(static_cast<char>(0x41)); // RP-User-Data element id
++    out.push_back(static_cast<char>(9));    // element length
++    out.push_back(static_cast<char>(0x00)); // SMS-DELIVER-Report
++    out.push_back(static_cast<char>(0x00)); // parameters
++    for (int i = 0; i < 7; i++)             // service-centre time stamp (unused, zeroed)
++        out.push_back(static_cast<char>(0x00));
++    return out;
++}
++
++std::string BuildRpError(int rpRef)
++{
++    std::string out;
++    out.push_back(static_cast<char>(ERpType::RP_ERROR_MS_TO_NETWORK));
++    out.push_back(static_cast<char>(rpRef & 0xFF));
++    out.push_back(static_cast<char>(0x42)); // RP-Cause element id
++    out.push_back(static_cast<char>(1));
++    out.push_back(static_cast<char>(0x5F)); // cause 95: semantically incorrect RP message
++    return out;
++}
++
++} // namespace ims
++} // namespace nr::ue
+diff --git a/src/ue/ims/sms_tpdu.hpp b/src/ue/ims/sms_tpdu.hpp
+new file mode 100644
+index 0000000..e7c308f
+--- /dev/null
++++ b/src/ue/ims/sms_tpdu.hpp
+@@ -0,0 +1,81 @@
++//
++// This file is a part of UERANSIM project.
++// Copyright (c) 2023 ALİ GÜNGÖR.
++//
++// https://github.com/aligungr/UERANSIM/
++// See README, LICENSE, and CONTRIBUTING files for licensing details.
++//
++
++#pragma once
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++namespace nr::ue
++{
++namespace ims
++{
++
++// SMS TPDU / RP-layer codec (TS 23.040, TS 24.011, TS 24.341), byte-level pure functions.
++
++// RP message types (first octet of the RP layer).
++enum class ERpType : uint8_t
++{
++    RP_DATA_MS_TO_NETWORK = 0x00,
++    RP_DATA_NETWORK_TO_MS = 0x01,
++    RP_ACK_MS_TO_NETWORK = 0x02,
++    RP_ACK_NETWORK_TO_MS = 0x03,
++    RP_ERROR_MS_TO_NETWORK = 0x04,
++};
++
++struct TpduEncodeResult
++{
++    bool ok{false};
++    std::string rpdu;   // full RP-DATA + SMS-SUBMIT body
++    int dcs{0};         // 0x00 GSM 7-bit, 0x08 UCS2
++    int septets{0};     // user-data length in septets (7-bit) or octets (UCS2)
++};
++
++// GSM 7-bit default alphabet packing (TS 23.038); ASCII subset maps 1:1 to septets.
++std::string Pack7Bit(const std::vector<uint8_t> &septets);
++std::vector<uint8_t> Unpack7Bit(const std::string &octets, int septetCount);
++
++// UTF-8 <-> UCS2 big-endian (surrogate pairs for code points above U+FFFF).
++std::string Utf8ToUcs2Be(const std::string &utf8);
++std::string Ucs2BeToUtf8(const std::string &ucs2);
++
++// Phone number <-> semi-octet encoding (TS 23.040 9.1.2.3).
++std::string EncodeSemiOctets(const std::string &digits);
++std::string DecodeSemiOctets(const uint8_t *data, int digitCount);
++
++// True when every character is in the ASCII-printable GSM default-alphabet subset.
++bool IsAsciiGsm(const std::string &utf8);
++
++// Builds the uplink body: RP-DATA (MS->network) carrying an SMS-SUBMIT TPDU.
++// dstDigits = TP-DA (SIP URI user part); srcDigits = RP-Originator (own identity).
++// Rejects (ok=false) text beyond one SMS (160 septets / 70 UCS2 chars).
++TpduEncodeResult BuildSubmitRpdu(const std::string &text, const std::string &srcDigits,
++                                 const std::string &dstDigits, int rpRef, int tpMr);
++
++struct DeliverParseResult
++{
++    bool ok{false};
++    bool isAck{false};    // body is an RP-ACK (not a new message)
++    std::string text;     // decoded user data (UTF-8)
++    std::string srcDigits;
++    int rpRef{0};
++    int dcs{0};
++};
++
++// Parses a downlink body: RP-ACK detection, or RP-DATA + SMS-DELIVER decoding.
++DeliverParseResult ParseDownlinkRpdu(const std::string &body);
++
++// RP-ACK (MS->network) acknowledging a received RP-DATA; mirrors the SMS center's layout.
++std::string BuildRpAck(int rpRef);
++
++// RP-ERROR (MS->network), cause 95 "semantically incorrect RP message" (TS 24.011 7.3.4).
++std::string BuildRpError(int rpRef);
 +
 +} // namespace ims
 +} // namespace nr::ue
@@ -3905,10 +4446,10 @@ index d363e9d..f9e0538 100644
      std::unique_ptr<NtsMessage> poll();
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
 new file mode 100644
-index 0000000..869a3a9
+index 0000000..de3a61e
 --- /dev/null
 +++ b/tests/CMakeLists.txt
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,26 @@
 +enable_testing()
 +
 +add_executable(ims-tests
@@ -3918,6 +4459,7 @@ index 0000000..869a3a9
 +  ../src/ue/ims/packet.cpp
 +  ../src/ue/ims/sip_stack.cpp
 +  ../src/ue/ims/transaction.cpp
++  ../src/ue/ims/sms_tpdu.cpp
 +  ../src/lib/crypt/milenage.cpp
 +  ../src/lib/crypt/mac.cpp
 +  ../src/ext/crypt-ext/aes.c
@@ -3936,10 +4478,10 @@ index 0000000..869a3a9
 +add_test(NAME ims-tests COMMAND ims-tests)
 diff --git a/tests/ims_tests.cpp b/tests/ims_tests.cpp
 new file mode 100644
-index 0000000..228f65a
+index 0000000..11d8a8c
 --- /dev/null
 +++ b/tests/ims_tests.cpp
-@@ -0,0 +1,546 @@
+@@ -0,0 +1,675 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -3961,6 +4503,7 @@ index 0000000..228f65a
 +#include "digest.hpp"
 +#include "packet.hpp"
 +#include "sip_stack.hpp"
++#include "sms_tpdu.hpp"
 +#include "transaction.hpp"
 +
 +using namespace nr::ue;
@@ -4254,7 +4797,7 @@ index 0000000..228f65a
 +    CHECK(req.cseqMethod == "INVITE");
 +    CHECK(req.contact == "<sip:001011234567895@192.168.101.3:5060;ob>");
 +
-+    auto reply = BuildSipReply(c, "192.168.101.5", 200, "OK", req, "tag-callee", PlaceholderSdp("192.168.101.5"));
++    auto reply = BuildSipReply(c, "192.168.101.5", 200, "OK", req, "tag-callee", PlaceholderSdp("192.168.101.5"), "application/sdp");
 +    auto resp = ParseSipResponse(reply);
 +    CHECK_EQ(resp.statusCode, 200);
 +    CHECK(resp.toTag == "tag-callee");
@@ -4464,6 +5007,133 @@ index 0000000..228f65a
 +    }
 +}
 +
++void TestSmsTpdu()
++{
++    using namespace ims;
++
++    // GSM 7-bit packing round trip.
++    {
++        std::vector<uint8_t> septets{'H', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd'};
++        auto packed = Pack7Bit(septets);
++        auto unpacked = Unpack7Bit(packed, (int)septets.size());
++        CHECK(unpacked == septets);
++        CHECK(Pack7Bit({}).empty());
++        CHECK(Unpack7Bit("", 0).empty());
++    }
++
++    // ASCII <-> GSM default alphabet subset detection.
++    CHECK(IsAsciiGsm("hello world 123"));
++    CHECK(!IsAsciiGsm(std::string("\xE4\xB8\xAD\xE6\x96\x87"))); // 中文
++
++    // UTF-8 <-> UCS2-BE (中文 = U+4E2D U+6587).
++    {
++        std::string utf8 = "\xE4\xB8\xAD\xE6\x96\x87";
++        auto ucs2 = Utf8ToUcs2Be(utf8);
++        CHECK_EQ(ucs2.size(), (size_t)4);
++        CHECK_EQ((uint8_t)ucs2[0], (uint8_t)0x4E);
++        CHECK_EQ((uint8_t)ucs2[1], (uint8_t)0x2D);
++        CHECK_EQ((uint8_t)ucs2[2], (uint8_t)0x65);
++        CHECK_EQ((uint8_t)ucs2[3], (uint8_t)0x87);
++        CHECK_EQ(Ucs2BeToUtf8(ucs2), utf8);
++    }
++
++    // Semi-octet encoding (nibble swap, F padding).
++    {
++        auto enc = EncodeSemiOctets("12345");
++        CHECK_EQ(enc.size(), (size_t)3);
++        CHECK_EQ((uint8_t)enc[0], (uint8_t)0x21);
++        CHECK_EQ((uint8_t)enc[1], (uint8_t)0x43);
++        CHECK_EQ((uint8_t)enc[2], (uint8_t)0xF5);
++        CHECK_EQ(DecodeSemiOctets(reinterpret_cast<const uint8_t *>(enc.data()), 5), std::string("12345"));
++    }
++
++    // SMS-SUBMIT RPDU: encoding is always UCS2 (TS 23.038); kamailio smsops 7-bit
++    // table defect at septet 0x2D makes 7-bit unreliable, so send side uses UCS2.
++    {
++        auto res = BuildSubmitRpdu("Hi", "001011234567895", "001011234567896", 7, 3);
++        CHECK(res.ok);
++        CHECK_EQ(res.dcs, 8);
++        CHECK_EQ(res.septets, 4); // 2 UCS2 code units = 4 octets
++        const std::string &r = res.rpdu;
++        CHECK_EQ((uint8_t)r[0], (uint8_t)0x00); // RP-DATA MS->network
++        CHECK_EQ((uint8_t)r[1], (uint8_t)7);    // RP-Ref
++        size_t pos = r.find(std::string(1, (char)0x05) + (char)3); // TPDU flags + TP-MR
++        CHECK(pos != std::string::npos);
++        CHECK_EQ((uint8_t)r[pos + 2], (uint8_t)15); // TP-DA length in digits
++    }
++
++    // SMS-SUBMIT RPDU: Chinese text -> UCS2.
++    {
++        auto res = BuildSubmitRpdu("\xE4\xB8\xAD", "001011234567895", "001011234567896", 1, 1);
++        CHECK(res.ok);
++        CHECK_EQ(res.dcs, 8);
++        CHECK_EQ(res.septets, 2); // 1 UCS2 code unit = 2 octets
++    }
++
++    // Single-SMS capacity rejection (UCS2: 70 code units).
++    {
++        std::string longAscii(71, 'a');
++        CHECK(!BuildSubmitRpdu(longAscii, "1", "2", 1, 1).ok);
++        CHECK(BuildSubmitRpdu(std::string(70, 'a'), "1", "2", 1, 1).ok);
++        std::string longCn;
++        for (int i = 0; i < 71; i++)
++            longCn += "\xE4\xB8\xAD";
++        CHECK(!BuildSubmitRpdu(longCn, "1", "2", 1, 1).ok);
++    }
++
++    // RP-ACK detection.
++    {
++        auto ack = ParseDownlinkRpdu(std::string(13, (char)0));
++        CHECK(!ack.ok); // all-zero is not an ACK
++        std::string netAck;
++        netAck.push_back((char)0x03); // RP-ACK network->MS
++        netAck += std::string(12, (char)0);
++        auto parsed = ParseDownlinkRpdu(netAck);
++        CHECK(parsed.ok);
++        CHECK(parsed.isAck);
++    }
++
++    // SMS-DELIVER parse round trip (network->MS, UCS2 payload).
++    {
++        std::string b;
++        b.push_back((char)0x01); // RP-DATA network->MS
++        b.push_back((char)0x2A); // RP-Ref
++        b.push_back((char)0);    // RP-Originator: empty
++        b.push_back((char)0);    // RP-Destination: empty
++        std::string tpdu;
++        tpdu.push_back((char)0x04); // SMS-DELIVER | TP-RD
++        tpdu.push_back((char)15);   // TP-OA digit count
++        tpdu.push_back((char)0x81); // TON
++        tpdu += EncodeSemiOctets("001011234567895");
++        tpdu.push_back((char)0x00); // TP-PID
++        tpdu.push_back((char)0x08); // TP-DCS UCS2
++        auto ucs2 = Utf8ToUcs2Be("\xE4\xB8\xAD\xE6\x96\x87");
++        tpdu.push_back((char)ucs2.size()); // TP-UDL
++        tpdu += ucs2;
++        b.push_back((char)tpdu.size());
++        b += tpdu;
++
++        auto parsed = ParseDownlinkRpdu(b);
++        CHECK(parsed.ok);
++        CHECK(!parsed.isAck);
++        CHECK_EQ(parsed.rpRef, 0x2A);
++        CHECK_EQ(parsed.srcDigits, std::string("001011234567895"));
++        CHECK_EQ(parsed.text, std::string("\xE4\xB8\xAD\xE6\x96\x87"));
++    }
++
++    // RP-ACK / RP-ERROR construction.
++    {
++        auto ack = BuildRpAck(0x2A);
++        CHECK_EQ(ack.size(), (size_t)13);
++        CHECK_EQ((uint8_t)ack[0], (uint8_t)0x02);
++        CHECK_EQ((uint8_t)ack[1], (uint8_t)0x2A);
++        auto err = BuildRpError(0x2A);
++        CHECK_EQ(err.size(), (size_t)5);
++        CHECK_EQ((uint8_t)err[0], (uint8_t)0x04);
++        CHECK_EQ((uint8_t)err[4], (uint8_t)0x5F);
++    }
++}
++
 +int main()
 +{
 +    TestMd5Vectors();
@@ -4477,6 +5147,7 @@ index 0000000..228f65a
 +    TestDigestResponse();
 +    TestDigestAuth();
 +    TestTransactionTable();
++    TestSmsTpdu();
 +
 +    if (g_failures == 0)
 +    {
