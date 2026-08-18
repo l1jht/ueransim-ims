@@ -18,10 +18,10 @@ linkIp: 172.21.0.1
 ngapIp: 172.21.0.1
 gtpIp: 172.21.0.1
 
-# AMF reachable from the host. 172.21.0.5 is the free5gc AMF container IP in the
+# AMF reachable from the host. 172.21.0.6 is the free5gc AMF container IP in the
 # testvonr compose environment; adapt to your core network.
 amfConfigs:
-  - address: 172.21.0.5
+  - address: 172.21.0.6
     port: 38412
 
 # S-NSSAIs supported by this gNB (must match the UE requests and the core network).

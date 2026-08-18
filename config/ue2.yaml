@@ -3,7 +3,7 @@
 # Requires root (TUN interface creation) and /dev/net/tun.
 
 # IMSI number of the UE. IMSI = [MCC|MNC|MSISDN] (15 or 16 digits)
-supi: 'imsi-001011234567895'
+supi: 'imsi-001011234567896'
 mcc: '001'
 mnc: '01'
 
@@ -75,15 +75,15 @@ integrityMaxRate:
 # Embedded IMS SIP client. enable defaults to false (no behavioural change without it).
 ims:
   enable: true
-  sipPort: 5060         # local SIP port (offset per UE when several share a host)
+  sipPort: 5061         # local SIP port (offset per UE when several share a host)
   pcscf: 172.21.0.21    # P-CSCF address (config-based; EPCO parsing is a P4 enhancement)
   pcscfPort: 5060
   registrar: ims.mnc001.mcc001.3gppnetwork.org
-  publicIdentity: sip:001011234567895@ims.mnc001.mcc001.3gppnetwork.org
-  privateIdentity: 001011234567895@ims.mnc001.mcc001.3gppnetwork.org
+  publicIdentity: sip:001011234567896@ims.mnc001.mcc001.3gppnetwork.org
+  privateIdentity: 001011234567896@ims.mnc001.mcc001.3gppnetwork.org
   realm: ims.mnc001.mcc001.3gppnetwork.org
   password: 8baf473f2f8fd09487cccbd7097c6862   # Ki (scscf MD5 mode)
   expires: 300          # request expires (the 200 OK value wins; re-register at 90%)
-  mediaPort: 50000      # local RTP media port (P3)
+  mediaPort: 50002      # local RTP media port (P3, offset per UE)
   autoAnswer: true      # auto-answer incoming INVITEs (false: use `ims-answer`)
   smsFormat: tpdu       # text (OTT) or tpdu (standard RP-DATA/UCS2, TS 24.341)
