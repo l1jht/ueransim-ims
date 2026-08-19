@@ -4509,10 +4509,10 @@ index 0000000..de3a61e
 +add_test(NAME ims-tests COMMAND ims-tests)
 diff --git a/tests/ims_tests.cpp b/tests/ims_tests.cpp
 new file mode 100644
-index 0000000..129b784
+index 0000000..1c6fa70
 --- /dev/null
 +++ b/tests/ims_tests.cpp
-@@ -0,0 +1,710 @@
+@@ -0,0 +1,711 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -4536,6 +4536,7 @@ index 0000000..129b784
 +#include "sip_stack.hpp"
 +#include "sms_tpdu.hpp"
 +#include "transaction.hpp"
++#include <lib/crypt/milenage.hpp>
 +
 +using namespace nr::ue;
 +using namespace nr::ue::ims;
@@ -4767,7 +4768,7 @@ index 0000000..129b784
 +        auto rkHex = DeriveRfc3310Password(m.ik, m.ck);
 +        OctetString rk16 = OctetString::FromHex(rkHex);
 +        CHECK_EQ((int)rk16.length(), 16);
-+        std::string expected(rk16.data(), rk16.length());
++        std::string expected(reinterpret_cast<const char *>(rk16.data()), rk16.length());
 +        CHECK_EQ(auth.akaPassword(), expected);
 +    }
 +
