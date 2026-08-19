@@ -510,10 +510,10 @@ index 82f7342..1fb9538 100644
  } // namespace nr::ue
 diff --git a/src/ue/ims/auth.cpp b/src/ue/ims/auth.cpp
 new file mode 100644
-index 0000000..2daddf1
+index 0000000..8c110cd
 --- /dev/null
 +++ b/src/ue/ims/auth.cpp
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,245 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -671,10 +671,12 @@ index 0000000..2daddf1
 +    if (m.mac_a != m_autn.subCopy(8, 8))
 +        return false;
 +
-+    // The deployed S-CSCF (kamailio ims_auth) verifies AKA digests against the XRES raw
-+    // bytes used as the digest password — not hex, not the RFC 3310 IK/CK-derived RK.
-+    // Empirically matched (python-verified) against the test S-CSCF.
-+    m_rkPassword.assign(reinterpret_cast<const char *>(m.res.data()), m.res.length());
++    // RFC 3310 §6.1: the AKA digest password is RK = MD5(hex(IK) + ":" + hex(CK)),
++    // derived from the Milenage f4/f3 outputs. The deployed S-CSCF carries AVP 610
++    // through a hex-decoding Diameter path (XRES-style), so the 16-byte binary form of
++    // RK is used as the digest password to match.
++    auto rkHex = DeriveRfc3310Password(m.ik, m.ck);
++    m_rkPassword.assign(reinterpret_cast<const char *>(OctetString::FromHex(rkHex).data()), 16);
 +    return true;
 +}
 +
@@ -709,6 +711,11 @@ index 0000000..2daddf1
 +bool DigestAuth::isAka() const
 +{
 +    return m_aka;
++}
++
++const std::string &DigestAuth::akaPassword() const
++{
++    return m_rkPassword;
 +}
 +
 +void DigestAuth::reset()
@@ -754,10 +761,10 @@ index 0000000..2daddf1
 +} // namespace nr::ue
 diff --git a/src/ue/ims/auth.hpp b/src/ue/ims/auth.hpp
 new file mode 100644
-index 0000000..0095839
+index 0000000..16c536c
 --- /dev/null
 +++ b/src/ue/ims/auth.hpp
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,81 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -803,6 +810,10 @@ index 0000000..0095839
 +
 +    // Returns true when the adopted challenge is AKA (AKAv1-MD5).
 +    bool isAka() const;
++
++    // The RFC 3310 derived digest password in use after a successful AKA validateAutn
++    // (16-byte binary form of RK, matching the S-CSCF AVP-610 hex-decoded transport).
++    const std::string &akaPassword() const;
 +
 +    // Validates AUTN (SEP bit + MAC). Returns true on success. Only meaningful after beginChallenge.
 +    bool validateAutn();
@@ -1120,10 +1131,10 @@ index 0000000..36cf7f1
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.cpp b/src/ue/ims/ims.cpp
 new file mode 100644
-index 0000000..f56ed16
+index 0000000..c8b47bf
 --- /dev/null
 +++ b/src/ue/ims/ims.cpp
-@@ -0,0 +1,1073 @@
+@@ -0,0 +1,1077 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -1591,6 +1602,8 @@ index 0000000..f56ed16
 +void ImsClientTask::handleIncomingSms(const ims::SipRequestInfo &req)
 +{
 +    static const std::string CT_3GPP_SMS = "application/vnd.3gpp.sms";
++    // Out-of-dialog SMS: the response to-tag is independent of any call dialog.
++    std::string smsToTag = generateId();
 +
 +    // TS 24.341: SMS over IMS is carried exclusively in application/vnd.3gpp.sms
 +    // bodies (RP-DATA / RP-ACK / RP-ERROR, TS 24.011). Anything else is rejected.
@@ -1599,7 +1612,7 @@ index 0000000..f56ed16
 +        m_logger->warn("MESSAGE with unsupported content-type [%s], replying 415",
 +                       req.contentType.c_str());
 +        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 415, "Unsupported Media Type", req,
-+                                      m_dialogMyTag, "", ""));
++                                      smsToTag, "", ""));
 +        return;
 +    }
 +
@@ -1609,14 +1622,14 @@ index 0000000..f56ed16
 +    if (parsed.ok && parsed.isAck)
 +    {
 +        m_logger->debug("SMS RP-ACK received");
-+        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag, "", ""));
++        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, smsToTag, "", ""));
 +        return;
 +    }
 +    if (!parsed.ok)
 +    {
 +        // TS 24.011: report the malformed RP message with RP-ERROR.
 +        m_logger->warn("Undecodable SMS RP/TPDU, replying RP-ERROR");
-+        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag,
++        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, smsToTag,
 +                                      ims::BuildRpError(0), CT_3GPP_SMS));
 +        return;
 +    }
@@ -1632,7 +1645,7 @@ index 0000000..f56ed16
 +    if (std::find(m_seenMsgKeys.begin(), m_seenMsgKeys.end(), key) != m_seenMsgKeys.end())
 +    {
 +        m_logger->debug("Duplicate MESSAGE suppressed [%s]", key.c_str());
-+        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag,
++        sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, smsToTag,
 +                                      ims::BuildRpAck(parsed.rpRef), CT_3GPP_SMS));
 +        return;
 +    }
@@ -1650,7 +1663,7 @@ index 0000000..f56ed16
 +
 +    // Single transaction: acknowledge immediately (RFC 3428); the 200 carries the
 +    // RP-ACK for the delivered SMS (TS 24.011).
-+    sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, m_dialogMyTag,
++    sendSipUdp(ims::BuildSipReply(m_base->config->ims, m_localIp, 200, "OK", req, smsToTag,
 +                                  ims::BuildRpAck(parsed.rpRef), CT_3GPP_SMS));
 +}
 +
@@ -1677,8 +1690,10 @@ index 0000000..f56ed16
 +    if (withAuth)
 +        authHeader = m_callAuth.authorization("INVITE", m_remoteUri);
 +
++    // RFC 3261 17.1.1.3: the Error ACK must reuse this INVITE transaction's branch.
++    m_callBranch = "z9hG4bK" + generateId();
 +    std::string body = ims::BuildInvite(m_base->config->ims, m_localIp, m_remoteUri, m_serviceRoute, m_callCallId,
-+                                        "z9hG4bK" + generateId(), m_dialogMyTag, authHeader);
++                                        m_callBranch, m_dialogMyTag, authHeader);
 +
 +    sendSipUdp(body);
 +
@@ -1701,7 +1716,7 @@ index 0000000..f56ed16
 +    // ACK for a non-2xx final response to an INVITE (RFC 3261 17.1.1.3): sent to the
 +    // P-CSCF, no Route/Contact, matching the failed transaction.
 +    std::string body = ims::BuildErrorAck(m_base->config->ims, m_localIp, m_remoteUri, m_callCallId,
-+                                          m_dialogMyTag, m_callCSeq);
++                                          m_dialogMyTag, m_callBranch, m_callCSeq);
 +    sendSipUdp(body);
 +    m_logger->debug("Error ACK sent [%d]", m_callCSeq);
 +}
@@ -2767,7 +2782,7 @@ index 0000000..cb16e33
 +} // namespace nr::ue
 diff --git a/src/ue/ims/sip_stack.cpp b/src/ue/ims/sip_stack.cpp
 new file mode 100644
-index 0000000..75fe9f4
+index 0000000..f79ea80
 --- /dev/null
 +++ b/src/ue/ims/sip_stack.cpp
 @@ -0,0 +1,597 @@
@@ -3124,14 +3139,14 @@ index 0000000..75fe9f4
 +}
 +
 +std::string BuildErrorAck(const ImsConfig &config, const std::string &localIp, const std::string &remoteUri,
-+                          const std::string &callId, const std::string &fromTag, int cseq)
++                          const std::string &callId, const std::string &fromTag, const std::string &branch, int cseq)
 +{
 +    // ACK for a non-2xx final response to an INVITE (RFC 3261 17.1.1.3): request-URI is the
-+    // INVITE request-URI, no Route/Contact, same Call-ID/branch semantics as the failed transaction.
++    // INVITE request-URI, no Route/Contact, branch matches the failed INVITE transaction.
 +    std::string body;
 +    body += "ACK " + remoteUri + " SIP/2.0\r\n";
 +    body += MakeHeader("Via", "SIP/2.0/UDP " + localIp + ":" + std::to_string(config.sipPort) +
-+                               ";rport;branch=z9hG4bK" + std::to_string(cseq));
++                               ";rport;branch=" + branch);
 +    body += MakeHeader("Max-Forwards", "70");
 +    body += MakeHeader("From", "<" + config.publicIdentity + ">;tag=" + fromTag);
 +    body += MakeHeader("To", "<" + remoteUri + ">");
@@ -3370,10 +3385,10 @@ index 0000000..75fe9f4
 +} // namespace nr::ue
 diff --git a/src/ue/ims/sip_stack.hpp b/src/ue/ims/sip_stack.hpp
 new file mode 100644
-index 0000000..bb0a563
+index 0000000..19c13f1
 --- /dev/null
 +++ b/src/ue/ims/sip_stack.hpp
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,121 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -3465,9 +3480,10 @@ index 0000000..bb0a563
 +                                 const std::string &from, const std::string &fromTag, const std::string &to,
 +                                 const std::string &toTag, int cseq);
 +
-+// Builds an ACK for a non-2xx final response to an INVITE (RFC 3261 17.1.1.3): no Route/Contact.
++// Builds an ACK for a non-2xx final response to an INVITE (RFC 3261 17.1.1.3): no Route/Contact,
++// branch reuses the failed INVITE transaction's branch.
 +std::string BuildErrorAck(const ImsConfig &config, const std::string &localIp, const std::string &remoteUri,
-+                          const std::string &callId, const std::string &fromTag, int cseq);
++                          const std::string &callId, const std::string &fromTag, const std::string &branch, int cseq);
 +
 +// Builds a response to an incoming request (echoes Via/From/Call-ID/CSeq, adds local To tag + Contact).
 +// contentType is used when body is non-empty.
@@ -3959,10 +3975,10 @@ index 0000000..e7c308f
 +} // namespace nr::ue
 diff --git a/src/ue/ims/transaction.cpp b/src/ue/ims/transaction.cpp
 new file mode 100644
-index 0000000..45ef907
+index 0000000..08d598c
 --- /dev/null
 +++ b/src/ue/ims/transaction.cpp
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,112 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -3972,6 +3988,8 @@ index 0000000..45ef907
 +//
 +
 +#include "transaction.hpp"
++
++#include <algorithm>
 +
 +namespace nr::ue
 +{
@@ -3987,7 +4005,9 @@ index 0000000..45ef907
 +        {
 +            e.method = method;
 +            e.body = body;
-+            e.retransmitsLeft = MAX_RETRANSMITS;
++            e.ticksUntilNext = 1;
++            e.intervalTicks = 1;
++            e.totalTicks = 0;
 +            return EArmResult::REPLACED;
 +        }
 +    }
@@ -3998,7 +4018,7 @@ index 0000000..45ef907
 +        m_entries.erase(m_entries.begin());
 +        evicted = true;
 +    }
-+    m_entries.push_back({callId, cseq, method, body, MAX_RETRANSMITS});
++    m_entries.push_back({callId, cseq, method, body, 1, 1, 0});
 +    return evicted ? EArmResult::ADDED_WITH_EVICTION : EArmResult::ADDED;
 +}
 +
@@ -4025,9 +4045,17 @@ index 0000000..45ef907
 +    std::vector<std::string> out;
 +    for (auto it = m_entries.begin(); it != m_entries.end();)
 +    {
-+        out.push_back(it->body);
-+        it->retransmitsLeft--;
-+        if (it->retransmitsLeft <= 0)
++        it->totalTicks++;
++        it->ticksUntilNext--;
++        bool expired = it->totalTicks >= TIMER_F_BUDGET_TICKS;
++        if (it->ticksUntilNext <= 0 && !expired)
++        {
++            out.push_back(it->body);
++            // RFC 3261: double the interval up to T2; Timer F budget bounds the total.
++            it->intervalTicks = std::min(it->intervalTicks * 2, MAX_INTERVAL_TICKS);
++            it->ticksUntilNext = it->intervalTicks;
++        }
++        if (expired)
 +            it = m_entries.erase(it);
 +        else
 +            ++it;
@@ -4065,10 +4093,10 @@ index 0000000..45ef907
 +} // namespace nr::ue
 diff --git a/src/ue/ims/transaction.hpp b/src/ue/ims/transaction.hpp
 new file mode 100644
-index 0000000..5bc1a33
+index 0000000..5a8817f
 --- /dev/null
 +++ b/src/ue/ims/transaction.hpp
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,63 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -4094,7 +4122,9 @@ index 0000000..5bc1a33
 +    int cseq{0};
 +    std::string method;
 +    std::string body;
-+    int retransmitsLeft{0};
++    int ticksUntilNext{1};   // ticks before the next retransmission (1 = 500 ms)
++    int intervalTicks{1};    // current retransmission interval (doubles up to T2)
++    int totalTicks{0};       // elapsed ticks since arm (Timer F budget)
 +};
 +
 +enum class EArmResult
@@ -4105,12 +4135,14 @@ index 0000000..5bc1a33
 +};
 +
 +// Retransmission lifecycle of pending SIP client transactions (INVITE/BYE/MESSAGE),
-+// keyed by Call-ID + CSeq. Pure logic: tick() returns the bodies to send, the caller
-+// owns transport and the 500 ms cadence.
++// keyed by Call-ID + CSeq. RFC 3261 exponential backoff: T1 = 1 tick (500 ms), doubling
++// up to T2 (8 ticks = 4 s); Timer F (non-INVITE) / Timer B (INVITE) budget 64 ticks (32 s).
++// Pure logic: tick() returns the bodies to send; the caller owns transport + cadence.
 +class SipTransactionTable
 +{
 +  public:
-+    static constexpr const int MAX_RETRANSMITS = 4;
++    static constexpr const int MAX_INTERVAL_TICKS = 8;  // T2 = 4 s
++    static constexpr const int TIMER_F_BUDGET_TICKS = 64; // 32 s
 +    static constexpr const std::size_t CAPACITY = 8;
 +
 +    EArmResult arm(const std::string &callId, int cseq, const std::string &method, const std::string &body);
@@ -4477,10 +4509,10 @@ index 0000000..de3a61e
 +add_test(NAME ims-tests COMMAND ims-tests)
 diff --git a/tests/ims_tests.cpp b/tests/ims_tests.cpp
 new file mode 100644
-index 0000000..9021960
+index 0000000..129b784
 --- /dev/null
 +++ b/tests/ims_tests.cpp
-@@ -0,0 +1,677 @@
+@@ -0,0 +1,710 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -4718,6 +4750,27 @@ index 0000000..9021960
 +    // AUTN validation: SEP bit + MAC-A must pass with the UERANSIM Milenage.
 +    CHECK(auth.validateAutn());
 +
++    // RFC 3310: the AKA digest password must be RK = MD5(hex(ik):hex(ck)) in its 16-byte
++    // binary form (matches the S-CSCF AVP-610 hex-decoded transport). Recompute IK/CK
++    // from the same vector and assert the stored password equals the RK binary.
++    {
++        const OctetString opc = OctetString::FromHex("8e27b6af0e692e750f32667a3b14605d");
++        const OctetString key = OctetString::FromHex("8baf473f2f8fd09487cccbd7097c6862");
++        const OctetString rand = OctetString::FromHex("8e2b76ca9754ebea67f3dfbeb490ef9a");
++        const OctetString autn = OctetString::FromHex("42c0b55ca18380008e268f667958321d");
++        static const OctetString zero6{OctetString::FromHex("000000000000")};
++        static const OctetString zero2{OctetString::FromHex("0000")};
++        auto m0 = crypto::milenage::Calculate(opc, key, rand, zero6, zero2);
++        OctetString sqn = OctetString::Xor(autn.subCopy(0, 6), m0.ak);
++        OctetString amf = autn.subCopy(6, 2);
++        auto m = crypto::milenage::Calculate(opc, key, rand, sqn, amf);
++        auto rkHex = DeriveRfc3310Password(m.ik, m.ck);
++        OctetString rk16 = OctetString::FromHex(rkHex);
++        CHECK_EQ((int)rk16.length(), 16);
++        std::string expected(rk16.data(), rk16.length());
++        CHECK_EQ(auth.akaPassword(), expected);
++    }
++
 +    auto hdr = auth.authorization("REGISTER", "sip:ims.mnc001.mcc001.3gppnetwork.org");
 +    CHECK(hdr.find("algorithm=AKAv1-MD5") != std::string::npos);
 +    CHECK(hdr.find("response=\"") != std::string::npos);
@@ -4910,18 +4963,30 @@ index 0000000..9021960
 +{
 +    using ims::SipTransactionTable;
 +
-+    // 1) arm -> tick retransmits 4 times at the caller's cadence, then the entry expires.
++    // 1) RFC 3261 exponential backoff: retransmits at ticks 1,3,7,15,23,31,39,47,55,63
++    //    (interval doubles 1->2->4->8, then stays at T2=8), then expires at the Timer F
++    //    budget (64 ticks).
 +    {
 +        SipTransactionTable t;
 +        CHECK_EQ((int)t.arm("call@a", 1, "INVITE", "INVITE-1"), (int)ims::EArmResult::ADDED);
-+        for (int i = 0; i < 4; i++)
++        int retransmitTicks[] = {1, 3, 7, 15, 23, 31, 39, 47, 55, 63};
++        int idx = 0;
++        for (int i = 1; i <= 64; i++)
 +        {
 +            auto out = t.tick();
-+            CHECK_EQ(out.size(), (size_t)1);
-+            CHECK_EQ(out[0], std::string("INVITE-1"));
++            if (idx < 10 && i == retransmitTicks[idx])
++            {
++                CHECK_EQ(out.size(), (size_t)1);
++                CHECK_EQ(out[0], std::string("INVITE-1"));
++                idx++;
++            }
++            else
++            {
++                CHECK(out.empty());
++            }
 +        }
-+        CHECK(t.tick().empty());
 +        CHECK(t.empty());
++        CHECK_EQ(idx, 10);
 +    }
 +
 +    // 2) cancel removes exactly the matching (Call-ID, CSeq) entry, sparing the rest.
