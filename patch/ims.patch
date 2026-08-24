@@ -14,21 +14,6 @@ index 08ec1fd..a7135c5 100644
  #################### GNB EXECUTABLE ####################
  
  add_executable(nr-gnb src/gnb.cpp)
-diff --git a/src/gnb/gtp/task.cpp b/src/gnb/gtp/task.cpp
-index 0475dcb..b9a131b 100644
---- a/src/gnb/gtp/task.cpp
-+++ b/src/gnb/gtp/task.cpp
-@@ -217,6 +217,10 @@ void GtpTask::handleUplinkData(int ueId, int psi, OctetString &&pdu)
-         else
-             m_udpServer->send(InetAddress(pduSession->upTunnel.address, cons::GtpPort), gtpPdu);
-     }
-+    else
-+    {
-+        m_logger->err("Uplink data dropped by rate limiter UE[%d] PSI[%d] len=%zu", ueId, psi, pdu.length());
-+    }
- }
- 
- void GtpTask::handleUdpReceive(const udp::NwUdpServerReceive &msg)
 diff --git a/src/lib/app/cli_cmd.cpp b/src/lib/app/cli_cmd.cpp
 index ca6325e..b9990da 100644
 --- a/src/lib/app/cli_cmd.cpp
@@ -2398,7 +2383,7 @@ index 0000000..e784483
 +} // namespace nr::ue
 diff --git a/src/ue/ims/media.cpp b/src/ue/ims/media.cpp
 new file mode 100644
-index 0000000..74fa667
+index 0000000..5eada24
 --- /dev/null
 +++ b/src/ue/ims/media.cpp
 @@ -0,0 +1,69 @@
@@ -2431,7 +2416,7 @@ index 0000000..74fa667
 +    m_localPort = localPort;
 +    m_peerIp = peerIp;
 +    m_peerPort = peerPort;
-+    m_ssrc = static_cast<int>(ssrc);
++    m_ssrc = ssrc;
 +    m_seq = 0;
 +    m_ts = 0;
 +    m_txCount = 0;
@@ -2473,7 +2458,7 @@ index 0000000..74fa667
 +} // namespace nr::ue::ims
 diff --git a/src/ue/ims/media.hpp b/src/ue/ims/media.hpp
 new file mode 100644
-index 0000000..fc8d54c
+index 0000000..a80f976
 --- /dev/null
 +++ b/src/ue/ims/media.hpp
 @@ -0,0 +1,56 @@
@@ -2511,7 +2496,7 @@ index 0000000..fc8d54c
 +    int m_localPort{0};
 +    std::string m_peerIp;
 +    int m_peerPort{0};
-+    int m_ssrc{0};
++    uint32_t m_ssrc{0};
 +    uint16_t m_seq{0};
 +    uint32_t m_ts{0};
 +    uint64_t m_txCount{0};
@@ -4239,21 +4224,6 @@ index 713ea2e..f65563c 100644
 +
  } // namespace nr::ue
 \ No newline at end of file
-diff --git a/src/ue/rls/udp_task.cpp b/src/ue/rls/udp_task.cpp
-index 466259d..278e169 100644
---- a/src/ue/rls/udp_task.cpp
-+++ b/src/ue/rls/udp_task.cpp
-@@ -87,6 +87,10 @@ void RlsUdpTask::send(int cellId, const rls::RlsMessage &msg)
-         auto sti = m_cellIdToSti[cellId];
-         sendRlsPdu(m_cells[sti].address, msg);
-     }
-+    else
-+    {
-+        m_logger->err("RLS uplink dropped: cellId=%d not in m_cellIdToSti (size=%zu)", cellId, m_cellIdToSti.size());
-+    }
- }
- 
- void RlsUdpTask::receiveRlsPdu(const InetAddress &addr, std::unique_ptr<rls::RlsMessage> &&msg)
 diff --git a/src/ue/types.hpp b/src/ue/types.hpp
 index f4a315e..a4245b8 100644
 --- a/src/ue/types.hpp
