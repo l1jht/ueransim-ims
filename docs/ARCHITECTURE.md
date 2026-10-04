@@ -101,6 +101,8 @@ INVITE 到达 → 180 Ringing → 200 OK（占位 SDP，回带 Record-Route）�
 - **RTP 直推 NAS**（与 SIP 同路径）：`MediaSession` 构造 IP/UDP/RTP 包 → `UPLINK_DATA_DELIVERY`；下行按 `ims.mediaPort` 分流进 IMS
 - **PCMU 静音流**（PT=0）：12B RTP 头 + 160B 全零帧（20ms），ts 160/包、seq+1，SSRC 派生自 `generateId`（已实现并验证：双端 mediaRxCount 持续增长）
 - **触发/停止**：200 OK（双方）启动；BYE/callFail/会话释放停止；尽力而为（错误仅日志）
+- **媒体发送节拍（修复，2026-10-04）**：`TIMER_MEDIA_SEND` 以**绝对截止时刻**按 20 ms 网格续期（媒体起始锚定 + 长停顿追赶保护）。原实现相对 `now` 续期，每周期累积排队/处理耗时（实测 ~1 ms/包 → 21.0 ms/包，5% 时钟漂移），接收端固定缓冲被持续抽干（欠载 5989 次、MOS 2.93）；修复后 20.000 ms、欠载 0、MOS 4.076
+- **媒体定时器续约（修复，2026-10-04）**：`CONFIRMED` 前（`CALLING`/`ANSWERING`）持续续约（不发送、只续期）。被叫侧首个触发可能早于 ACK（带时延建呼叫时更明显），原实现"未 CONFIRMED 即不再续约"会导致被叫 RTP 发送永久停摆（单向媒体）；与上一条统一使用绝对 20 ms 网格
 - **SDP**：`m=audio <ims.mediaPort> RTP/AVP 0` + `c=IN IP4 <pduAddress>`；对端目标解析 200 OK SDP answer 的 `c=`/`m=`（rtpengine 中转地址）
 - **QoS**：P-CSCF N5 AUDIO 组件 201（medType AUDIO）+ 5QI=1 流（探测项）；UE 上行绑定 5QI=1 为 UERANSIM 平台限制（PDU 会话修改未实现）
 

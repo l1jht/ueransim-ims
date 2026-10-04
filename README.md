@@ -78,6 +78,7 @@ sudo ./nr-ue -c <path-to>/config/ue.yaml
 - ✅ P2 呼叫：INVITE → 200 → ACK → CONFIRMED → BYE，主叫与被叫自动应答均验证（in-dialog 路由遵循 Record-Route）
 - ✅ 双向互呼：正/反向全通（注册/CLI 防护/SMS/双向呼叫/媒体/EPCO 共 23 项回归断言全绿）；双 UERANSIM IMS 客户端互呼 10/10 稳定性（早前"外部客户端经 I-CSCF 偶发 500"经查为被叫注册过期表象，注册稳定后不复现）
 - ✅ P3 媒体：RTP 静音流双向收发（rtpengine 中转）+ P-CSCF N5 AUDIO 组件 201
+- ✅ P3 媒体定时器保真（2026-10-04，两项修复）：① 发送节拍改**绝对截止时刻**续期（原相对 now 续期每包累积排队/处理耗时，实测 21.0→20.0 ms/包、固定 60 ms 缓冲欠载 5989→0、E-model MOS 2.93→4.076）；② `CONFIRMED` 前（CALLING/ANSWERING）持续续约（修复"带时延建立呼叫"下被叫首个触发早于 ACK 导致的 RTP 永久停摆/单向媒体；A/B 复现 → 修复后双向验证）
 - ✅ P4 增强：EPCO 下发 P-CSCF（0x000C，EPCO 优先/配置兜底）+ IMS AKA（AKAv1-MD5，S-CSCF `ALGORITHM IS [AKAv1-MD5]` + `Auth succeeded`）
 - ✅ P5 SMS over IMS：`ims-sms` 双向互发（**单模式 TPDU**：标准 RP-DATA/UCS2，TS 24.341），特殊字符与中文完整、202 应答、RP-ACK/RP-ERROR、弱网 25% 无重复投递、23 断言套件全绿（2026-08-18/19）
 

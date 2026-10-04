@@ -1116,10 +1116,10 @@ index 0000000..36cf7f1
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.cpp b/src/ue/ims/ims.cpp
 new file mode 100644
-index 0000000..c8b47bf
+index 0000000..f764975
 --- /dev/null
 +++ b/src/ue/ims/ims.cpp
-@@ -0,0 +1,1077 @@
+@@ -0,0 +1,1097 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -1488,7 +1488,25 @@ index 0000000..c8b47bf
 +        if (m_callState == ECallState::CONFIRMED)
 +        {
 +            m_media.Send();
-+            setTimer(TIMER_MEDIA_SEND, MEDIA_SEND_MS);
++            // 绝对截止时刻续期：保持锚定在媒体起始的 20 ms 网格上。
++            // 若改为相对 now 续期，每包会累积一次回调/轮询耗时（实测 ~1 ms），
++            // 实际节奏被拉长到 ~21 ms（媒体时钟漂移，接收端缓冲持续欠载）。
++            m_nextMediaSendMs += MEDIA_SEND_MS;
++            int64_t nowMs = utils::CurrentTimeMillis();
++            if (m_nextMediaSendMs <= nowMs)
++                m_nextMediaSendMs = nowMs + MEDIA_SEND_MS; // 长停顿后的追赶保护
++            setTimerAbsolute(TIMER_MEDIA_SEND, m_nextMediaSendMs);
++        }
++        else if (m_callState == ECallState::CALLING || m_callState == ECallState::ANSWERING)
++        {
++            // CONFIRMED 之前继续按同一 20 ms 网格续期但不发送（ACK-race 修复）：
++            // 被叫首拍（startMedia+20 ms）可能早于 ACK；若不续期，RTP 发送将永久停摆
++            // （单向媒体）。绝对续期保证 ACK 到达后首包仍落在 20 ms 网格上。
++            m_nextMediaSendMs += MEDIA_SEND_MS;
++            int64_t nowMs = utils::CurrentTimeMillis();
++            if (m_nextMediaSendMs <= nowMs)
++                m_nextMediaSendMs = nowMs + MEDIA_SEND_MS;
++            setTimerAbsolute(TIMER_MEDIA_SEND, m_nextMediaSendMs);
 +        }
 +        break;
 +    case TIMER_2XX_RETRANSMIT:
@@ -1904,7 +1922,9 @@ index 0000000..c8b47bf
 +{
 +    m_media.Start(m_psi, m_localIp, m_base->config->ims.mediaPort, peerIp, peerPort, m_mediaSsrc);
 +    m_mediaSsrc++;
-+    setTimer(TIMER_MEDIA_SEND, MEDIA_SEND_MS);
++    // 绝对截止时刻续期：锚定 20 ms 网格（相对 now 续期会累积处理耗时 -> 实际 ~21 ms/包）
++    m_nextMediaSendMs = utils::CurrentTimeMillis() + MEDIA_SEND_MS;
++    setTimerAbsolute(TIMER_MEDIA_SEND, m_nextMediaSendMs);
 +    m_logger->info("Media started [peer=%s:%d]", peerIp.c_str(), peerPort);
 +}
 +
@@ -2199,10 +2219,10 @@ index 0000000..c8b47bf
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.hpp b/src/ue/ims/ims.hpp
 new file mode 100644
-index 0000000..e784483
+index 0000000..fb515db
 --- /dev/null
 +++ b/src/ue/ims/ims.hpp
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,179 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -2326,6 +2346,7 @@ index 0000000..e784483
 +    ims::RtpSender m_media;
 +    uint64_t m_mediaRxCount{0};
 +    uint32_t m_mediaSsrc{0};
++    int64_t m_nextMediaSendMs{0}; // 媒体发送绝对截止时刻（20 ms 网格，防漂移）
 +
 +    // Pseudo-random generator counter
 +    uint64_t m_rngCounter{0};
