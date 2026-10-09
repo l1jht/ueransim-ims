@@ -105,6 +105,7 @@ INVITE 到达 → 180 Ringing → 200 OK（占位 SDP，回带 Record-Route）�
 - **媒体定时器续约（修复，2026-10-04）**：`CONFIRMED` 前（`CALLING`/`ANSWERING`）持续续约（不发送、只续期）。被叫侧首个触发可能早于 ACK（带时延建呼叫时更明显），原实现"未 CONFIRMED 即不再续约"会导致被叫 RTP 发送永久停摆（单向媒体）；与上一条统一使用绝对 20 ms 网格
 - **SDP**：`m=audio <ims.mediaPort> RTP/AVP 0` + `c=IN IP4 <pduAddress>`；对端目标解析 200 OK SDP answer 的 `c=`/`m=`（rtpengine 中转地址）
 - **QoS**：P-CSCF N5 AUDIO 组件 201（medType AUDIO）+ 5QI=1 流（探测项）；UE 上行绑定 5QI=1 为 UERANSIM 平台限制（PDU 会话修改未实现）
+- **re-INVITE 媒体重锚（P6，2026-10-05 并入补丁）**：会话重绑定（本地 IP 变化）时释放停媒体、重绑定以新 IP 重建、主叫注册成功后发带 SDP 的 in-dialog re-INVITE；对端（UAS 分支）按 SDP 更新媒体并 200 OK。设计细节与局限见 [REINVITE.md](REINVITE.md)
 
 ## 测试策略
 

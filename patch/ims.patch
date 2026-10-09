@@ -1116,10 +1116,10 @@ index 0000000..36cf7f1
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.cpp b/src/ue/ims/ims.cpp
 new file mode 100644
-index 0000000..f764975
+index 0000000..ddf951e
 --- /dev/null
 +++ b/src/ue/ims/ims.cpp
-@@ -0,0 +1,1097 @@
+@@ -0,0 +1,1206 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -1276,6 +1276,20 @@ index 0000000..f764975
 +    m_retryIndex = 0;
 +    m_lastError.clear();
 +    startRegistration();
++
++    // E6 锚点迁移：SSC 重激活后 IMS PDU 会话重建、本地 IP 变化。若通话仍处于已建立状态，
++    // 重建媒体；re-INVITE 仅在主叫侧、且推迟到本端注册成功后发送（避免与 REGISTER 竞争，
++    // 被叫侧由其 200 OK 的 SDP 答案刷新媒体端点——同时迁移（S2）时核心无法处理被叫方向
++    // 发起的反向 in-dialog 请求，见开发报告 §6）。
++    if (m_callState == ECallState::CONFIRMED && !m_mediaPeerIp.empty())
++    {
++        startMedia(m_mediaPeerIp, m_mediaPeerPort);
++        if (m_isCaller)
++        {
++            m_reinvitePending = true;
++            m_logger->info("Re-INVITE pending until registration success");
++        }
++    }
 +}
 +
 +void ImsClientTask::handleSessionReleased(const NmUeAppToIms &msg)
@@ -1290,6 +1304,13 @@ index 0000000..f764975
 +    m_regState = ERegState::IDLE;
 +    m_lastError.clear();
 +    m_serviceRoute.clear();
++
++    // E6：通话进行中锚点释放——媒体随旧锚点失效；通话状态保留，待重绑定后 re-INVITE 恢复。
++    if (m_callState != ECallState::IDLE)
++    {
++        m_logger->info("Call active during session release, stopping media (re-INVITE on re-bind)");
++        stopMedia();
++    }
 +}
 +
 +void ImsClientTask::handleDownlinkData(const NmUeAppToIms &msg)
@@ -1680,6 +1701,8 @@ index 0000000..f764975
 +    m_callUsingAuth = false;
 +    m_callCSeq = 1;
 +    m_callState = ECallState::CALLING;
++    m_isCaller = true;
++    m_reinvitePending = false;
 +    m_callRouteSet = "<sip:" + m_pcscfIp + ":" + std::to_string(m_base->config->ims.pcscfPort) + ";lr>," + m_serviceRoute;
 +
 +    m_logger->info("Sending INVITE to %s", uri.c_str());
@@ -1734,6 +1757,24 @@ index 0000000..f764975
 +    sendSipUdp(body);
 +    armTx(m_callCallId, m_callCSeq, "BYE", body);
 +    m_logger->debug("BYE sent");
++}
++
++void ImsClientTask::sendReInvite()
++{
++    // E6：锚点迁移/会话重绑定后，用新本地 IP 重发带 SDP 的 in-dialog INVITE。
++    // 目标用对端 AOR（m_remoteUri）而非存量 Contact：S2（双端同时重锚）时对端 Contact
++    // 已随旧 IP 失效，交由 IMS 核心按注册绑定解析到对端当前地址。
++    m_callCSeq++;
++    m_reinviteCSeq = m_callCSeq;
++    m_callBranch = "z9hG4bK" + generateId();
++    std::string sdp = ims::BuildMediaSdp(m_localIp, m_base->config->ims.mediaPort);
++    std::string body = ims::BuildInDialogRequest("INVITE", m_localIp, m_base->config->ims, m_remoteUri,
++                                                 "" /* 目标=AOR */, m_callRouteSet, m_callCallId, m_callBranch,
++                                                 m_base->config->ims.publicIdentity, m_dialogMyTag, m_remoteUri,
++                                                 m_dialogPeerTag, m_callCSeq, "application/sdp", sdp);
++    sendSipUdp(body);
++    armTx(m_callCallId, m_callCSeq, "INVITE", body);
++    m_logger->info("Re-INVITE sent [local=%s]", m_localIp.c_str());
 +}
 +
 +void ImsClientTask::hangupCall()
@@ -1802,6 +1843,32 @@ index 0000000..f764975
 +            return;
 +        }
 +    }
++    else if (m_callState == ECallState::CONFIRMED)
++    {
++        // E6：re-INVITE 的最终响应（本地 IP 变化后的媒体重锚）。
++        if (m_reinviteCSeq == 0 || info.cseq != m_reinviteCSeq)
++            return; // 非 re-INVITE 事务的迟到响应
++        if (info.statusCode == 200)
++        {
++            // 不采信 re-INVITE 200 的 Contact：IMS 核心会对其做 NAT 别名改写（实测 alias
++            // 被改为 S-CSCF 地址），若更新 m_remoteContact，下一次 in-dialog 请求的
++            // Request-URI 将失效（S-CSCF 404 destination user not found）。原对话 Contact
++            // 仍有效（本端迁移不改变对端位置）。
++            sendAck();
++            std::string peerIp;
++            int peerPort = 0;
++            if (ims::ParseSdpMedia(info.body, peerIp, peerPort) &&
++                (peerIp != m_mediaPeerIp || peerPort != m_mediaPeerPort))
++                startMedia(peerIp, peerPort);
++            m_logger->info("Re-INVITE accepted, media re-anchored");
++        }
++        else if (info.statusCode >= 300)
++        {
++            sendErrorAck();
++            m_logger->warn("Re-INVITE failed [%d %s]", info.statusCode, info.reasonPhrase.c_str());
++        }
++        return;
++    }
 +    else if (m_callState == ECallState::HANGING_UP)
 +    {
 +        if (info.statusCode == 200)
@@ -1832,6 +1899,31 @@ index 0000000..f764975
 +    {
 +        if (m_callState != ECallState::IDLE)
 +        {
++            // E6：已建立通话内的 re-INVITE（对端锚点迁移后媒体地址变化）——更新媒体对端并 200 OK。
++            if (m_callState == ECallState::CONFIRMED && req.callId == m_callCallId)
++            {
++                if (req.cseq == m_lastRemoteInviteCSeq && m_lastReplyCode != 0)
++                {
++                    sendCallReply(m_pendingInvite, m_lastReplyCode, m_lastReplyReason, m_lastReplyBody);
++                    return;
++                }
++                m_lastRemoteInviteCSeq = req.cseq;
++                m_pendingInvite = req;
++                std::string peerIp;
++                int peerPort = 0;
++                if (ims::ParseSdpMedia(req.body, peerIp, peerPort) &&
++                    (peerIp != m_mediaPeerIp || peerPort != m_mediaPeerPort))
++                    startMedia(peerIp, peerPort);
++                std::string sdp = ims::BuildMediaSdp(m_localIp, m_base->config->ims.mediaPort);
++                sendCallReply(req, 200, "OK", sdp);
++                m_lastReplyCode = 200;
++                m_lastReplyReason = "OK";
++                m_lastReplyBody = sdp;
++                m_2xxRetransmitActive = true;
++                setTimer(TIMER_2XX_RETRANSMIT, TX_RETRANSMIT_MS);
++                m_logger->info("Re-INVITE received, media re-anchored, 200 OK sent");
++                return;
++            }
 +            // INVITE retransmission (same Call-ID + CSeq) of the in-progress call:
 +            // re-send the last reply instead of treating it as a new call.
 +            if (req.callId == m_callCallId && req.cseq == m_callCSeq && m_lastReplyCode != 0)
@@ -1851,6 +1943,8 @@ index 0000000..f764975
 +        m_pendingInvite = req;
 +        m_callCallId = req.callId;
 +        m_callCSeq = req.cseq;
++        m_isCaller = false;
++        m_reinvitePending = false;
 +        m_lastReplyCode = 0;
 +        m_2xxRetransmitActive = false;
 +        m_dialogMyTag = generateId();
@@ -1905,6 +1999,10 @@ index 0000000..f764975
 +            m_2xxRetransmitActive = false;  // ACK acknowledges the 2xx; stop retransmitting
 +            m_callState = ECallState::CONFIRMED;
 +        }
++        else if (m_callState == ECallState::CONFIRMED)
++        {
++            m_2xxRetransmitActive = false;  // re-INVITE 的 2xx ACK
++        }
 +    }
 +    else if (req.method == "BYE")
 +    {
@@ -1920,6 +2018,8 @@ index 0000000..f764975
 +
 +void ImsClientTask::startMedia(const std::string &peerIp, int peerPort)
 +{
++    m_mediaPeerIp = peerIp;
++    m_mediaPeerPort = peerPort;
 +    m_media.Start(m_psi, m_localIp, m_base->config->ims.mediaPort, peerIp, peerPort, m_mediaSsrc);
 +    m_mediaSsrc++;
 +    // 绝对截止时刻续期：锚定 20 ms 网格（相对 now 续期会累积处理耗时 -> 实际 ~21 ms/包）
@@ -1964,6 +2064,8 @@ index 0000000..f764975
 +    cancelTimer(TIMER_2XX_RETRANSMIT);
 +    m_2xxRetransmitActive = false;
 +    m_callState = ECallState::IDLE;
++    m_isCaller = false;
++    m_reinvitePending = false;
 +    m_callCallId.clear();
 +    m_remoteContact.clear();
 +    m_dialogPeerTag.clear();
@@ -2108,6 +2210,13 @@ index 0000000..f764975
 +
 +    m_logger->info("IMS registration succeeded [expires=%d]", m_regExpires);
 +    scheduleReRegister();
++
++    // E6：注册成功后再发送待发的 re-INVITE（避免与 REGISTER/绑定更新竞争）。
++    if (m_reinvitePending && m_callState == ECallState::CONFIRMED)
++    {
++        m_reinvitePending = false;
++        sendReInvite();
++    }
 +}
 +
 +void ImsClientTask::scheduleRetry()
@@ -2219,10 +2328,10 @@ index 0000000..f764975
 +} // namespace nr::ue
 diff --git a/src/ue/ims/ims.hpp b/src/ue/ims/ims.hpp
 new file mode 100644
-index 0000000..fb515db
+index 0000000..7f30259
 --- /dev/null
 +++ b/src/ue/ims/ims.hpp
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,188 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -2347,6 +2456,14 @@ index 0000000..fb515db
 +    uint64_t m_mediaRxCount{0};
 +    uint32_t m_mediaSsrc{0};
 +    int64_t m_nextMediaSendMs{0}; // 媒体发送绝对截止时刻（20 ms 网格，防漂移）
++    std::string m_mediaPeerIp;    // 当前媒体对端（来自最近一次 SDP）
++    int m_mediaPeerPort{0};
++
++    // E6 锚点迁移：本地 IP 变化后用 re-INVITE 重锚媒体（新增）
++    int m_reinviteCSeq{0};          // 本端最近一次 re-INVITE 的 CSeq
++    int m_lastRemoteInviteCSeq{0};  // 对端最近一次 re-INVITE 的 CSeq（重传判重）
++    bool m_isCaller{false};         // 本端是否为主叫（仅主叫发起 re-INVITE；见 report）
++    bool m_reinvitePending{false};  // 待注册成功后发送 re-INVITE
 +
 +    // Pseudo-random generator counter
 +    uint64_t m_rngCounter{0};
@@ -2385,6 +2502,7 @@ index 0000000..fb515db
 +    void startMedia(const std::string &peerIp, int peerPort);
 +    void stopMedia();
 +    void sendBye();
++    void sendReInvite();
 +    void hangupCall();
 +    void handleCallResponse(const ims::SipResponseInfo &info);
 +    void handleCallRequest(const ims::SipRequestInfo &req);
@@ -2788,10 +2906,10 @@ index 0000000..cb16e33
 +} // namespace nr::ue
 diff --git a/src/ue/ims/sip_stack.cpp b/src/ue/ims/sip_stack.cpp
 new file mode 100644
-index 0000000..f79ea80
+index 0000000..2834536
 --- /dev/null
 +++ b/src/ue/ims/sip_stack.cpp
-@@ -0,0 +1,597 @@
+@@ -0,0 +1,601 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -3102,7 +3220,8 @@ index 0000000..f79ea80
 +                                 const std::string &remoteUri, const std::string &remoteContact,
 +                                 const std::string &routeSet, const std::string &callId, const std::string &branch,
 +                                 const std::string &from, const std::string &fromTag, const std::string &to,
-+                                 const std::string &toTag, int cseq)
++                                 const std::string &toTag, int cseq,
++                                 const std::string &contentType, const std::string &contentBody)
 +{
 +    // The request target is the remote Contact (URI without the angle brackets), falling back to the dialed URI.
 +    std::string target = remoteContact;
@@ -3139,8 +3258,11 @@ index 0000000..f79ea80
 +    body += MakeHeader("Call-ID", callId);
 +    body += MakeHeader("CSeq", std::to_string(cseq) + " " + method);
 +    body += MakeHeader("Contact", ContactHeader(config, localIp));
-+    body += "Content-Length: 0\r\n";
++    if (!contentBody.empty())
++        body += MakeHeader("Content-Type", contentType);
++    body += "Content-Length: " + std::to_string(contentBody.size()) + "\r\n";
 +    body += "\r\n";
++    body += contentBody;
 +    return body;
 +}
 +
@@ -3391,10 +3513,10 @@ index 0000000..f79ea80
 +} // namespace nr::ue
 diff --git a/src/ue/ims/sip_stack.hpp b/src/ue/ims/sip_stack.hpp
 new file mode 100644
-index 0000000..19c13f1
+index 0000000..6fc964b
 --- /dev/null
 +++ b/src/ue/ims/sip_stack.hpp
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,123 @@
 +//
 +// This file is a part of UERANSIM project.
 +// Copyright (c) 2023 ALİ GÜNGÖR.
@@ -3479,12 +3601,14 @@ index 0000000..19c13f1
 +                         int cseq, const std::string &callId, const std::string &branch, const std::string &tag,
 +                         const std::string &contentType, const std::string &body);
 +
-+// Builds an in-dialog request (ACK/BYE). routeSet is the list of Route header values.
++// Builds an in-dialog request (ACK/BYE/re-INVITE). routeSet is the list of Route header values.
++// A non-empty contentBody is attached with the given Content-Type (application/sdp for re-INVITE).
 +std::string BuildInDialogRequest(const std::string &method, const std::string &localIp, const ImsConfig &config,
 +                                 const std::string &remoteUri, const std::string &remoteContact,
 +                                 const std::string &routeSet, const std::string &callId, const std::string &branch,
 +                                 const std::string &from, const std::string &fromTag, const std::string &to,
-+                                 const std::string &toTag, int cseq);
++                                 const std::string &toTag, int cseq,
++                                 const std::string &contentType = "", const std::string &contentBody = "");
 +
 +// Builds an ACK for a non-2xx final response to an INVITE (RFC 3261 17.1.1.3): no Route/Contact,
 +// branch reuses the failed INVITE transaction's branch.

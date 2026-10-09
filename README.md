@@ -10,6 +10,7 @@ SIP 包在 UERANSIM 进程内直推 NAS/GTP 数据面（`NmUeAppToNas::UPLINK_DA
 - **P-CSCF 双来源**：**EPCO 下发优先**（PDU 会话建立请求带 0x000C，SMF 回写 P-CSCF），`ims.pcscf` 配置兜底
 - **自动应答呼叫**：`autoAnswer`（默认 true）自动回 180/200；INVITE 带两条 Route（P-CSCF + Service-Route）与真实媒体 SDP；in-dialog 路由遵循 Record-Route；**2xx 按 RFC 3261 Timer G 每 500ms 重传直至 ACK（弱网下 200 丢失可救回）**
 - **RTP 媒体流（P3）**：PCMU 静音流 20ms 双向收发（rtpengine 中转），收包计数暴露于 `ims-status`；P-CSCF N5 AUDIO 组件授权
+- **re-INVITE 媒体重锚（P6）**：PDU 会话重激活（锚点迁移/失效重选）后本地 IP 变化时，`CONFIRMED` 通话由主叫在注册成功后以新地址发送 in-dialog re-INVITE；对端按 SDP 更新媒体应答——**同一通话媒体恢复，无需重拨**（双端均需本补丁，详见 [docs/REINVITE.md](docs/REINVITE.md)）
 - **CLI 控制**：`ims-register`（手动强制重注册）/ `ims-call <uri>` / `ims-answer` / `ims-hangup` / `ims-sms <uri> <text>` / `ims-status`
 - **SMS over IMS**：`ims-sms` 发送 SIP MESSAGE（标准封装：RP-DATA+SMS-SUBMIT，TS 23.040/24.011/24.341，UCS2 编码，202 应答 + RP-ACK/RP-ERROR 处理）；接收自动应答并打印，最近 10 条经 `ims-status` 的 `smsHistory` 可见（配合短信中心 smsc 存储+异步投递）
 - **零外部依赖**：自实现 SIP 协议栈、MD5（RFC 1321）、Digest（RFC 2617）、AKA（Milenage）、IPv4/UDP 封包（RFC 768）——无 libcurl/libxml/pjsip
@@ -71,6 +72,7 @@ sudo ./nr-ue -c <path-to>/config/ue.yaml
 | [docs/RUN.md](docs/RUN.md) | 宿主运行拓扑、配置说明、CLI、验证观测点、已知坑 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 模块设计、状态机、信令流程、测试策略 |
 | [docs/CONTAINER-COMPARISON.md](docs/CONTAINER-COMPARISON.md) | 与容器版 pjsua 验证环境的对照 |
+| [docs/REINVITE.md](docs/REINVITE.md) | 锚点迁移后的媒体重锚：设计、三个关键修正、兼容性与验证摘要 |
 
 ## 验证状态
 
@@ -81,6 +83,7 @@ sudo ./nr-ue -c <path-to>/config/ue.yaml
 - ✅ P3 媒体定时器保真（2026-10-04，两项修复）：① 发送节拍改**绝对截止时刻**续期（原相对 now 续期每包累积排队/处理耗时，实测 21.0→20.0 ms/包、固定 60 ms 缓冲欠载 5989→0、E-model MOS 2.93→4.076）；② `CONFIRMED` 前（CALLING/ANSWERING）持续续约（修复"带时延建立呼叫"下被叫首个触发早于 ACK 导致的 RTP 永久停摆/单向媒体；A/B 复现 → 修复后双向验证）
 - ✅ P4 增强：EPCO 下发 P-CSCF（0x000C，EPCO 优先/配置兜底）+ IMS AKA（AKAv1-MD5，S-CSCF `ALGORITHM IS [AKAv1-MD5]` + `Auth succeeded`）
 - ✅ P5 SMS over IMS：`ims-sms` 双向互发（**单模式 TPDU**：标准 RP-DATA/UCS2，TS 24.341），特殊字符与中文完整、202 应答、RP-ACK/RP-ERROR、弱网 25% 无重复投递、23 断言套件全绿（2026-08-18/19）
+- ✅ P6 re-INVITE 媒体重锚（2026-10-05）：锚点迁移后**同一通话**媒体恢复（切换场景 ≈2.1–2.3 s；锚点失效场景 ≈检测 + 0.5 s），无需重拨（双端均需本补丁）
 
 ## 许可
 
